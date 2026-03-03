@@ -1,0 +1,366 @@
+"""
+main.py — Orquestador de la capa lógica de conciliación bancaria.
+
+Flujo:
+    parsers → normalizers → validator → engine → reporter
+
+Uso CLI:
+    python main.py --bank  data/raw/bank/estado_cuenta.xlsx
+                   --jde   data/raw/jde/movimientos_jde.xlsx
+                   --output data/output/reconciliations/
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+from src.parsers.bank_parser import BankParser
+from src.parsers.jde_parser import JDEParser
+from src.normalizers.bank_normalizer import BankNormalizer
+from src.normalizers.jde_normalizer import JDENormalizer
+from src.validacion.schema_validator import DataFrameSchemaValidator, SchemaValidationError
+from src.matching.reconciliation_engine import ReconciliationEngine
+from src.reporting.excel_reporter import ExcelReporter
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ============================================================
+# ENRIQUECIMIENTO BANCO ← REPORTE CAJA
+# ============================================================
+
+def _enrich_bank_with_reporte(bank_df, reporte_df):
+    """
+    Añade las columnas ``tienda`` y ``tipo_banco`` al DataFrame bancario
+    haciendo un join por fecha + monto exacto contra el REPORTE CAJA.
+
+    El banco puede tener movimientos que no aparecen en el reporte
+    (traspasos, nóminas, etc.); esos quedan con tienda=None y siguen
+    pasando al motor con la lógica normal de monto.
+    """
+    import pandas as _pd
+
+    if reporte_df.empty or "tienda" not in reporte_df.columns:
+        return bank_df
+
+    # Normalizar columnas de enriquecimiento
+    rep = reporte_df[["movement_date", "abs_amount", "tienda", "tipo_banco"]].copy()
+    rep = rep.dropna(subset=["abs_amount"])
+    rep["_amt_key"] = rep["abs_amount"].round(2)
+    rep["_date_key"] = rep["movement_date"].dt.date
+
+    # Eliminar duplicados de clave (si el reporte repite el mismo monto+fecha+tienda)
+    rep = rep.drop_duplicates(subset=["_date_key", "_amt_key"])
+
+    bank = bank_df.copy()
+    bank["_amt_key"]  = bank["abs_amount"].round(2)
+    bank["_date_key"] = bank["movement_date"].dt.date
+
+    merged = bank.merge(
+        rep[["_date_key", "_amt_key", "tienda", "tipo_banco"]],
+        on=["_date_key", "_amt_key"],
+        how="left",
+        suffixes=("", "_rep"),
+    )
+
+    # Si bank_df ya tenía tienda (p. ej. también es REPORTE), preferir la existente
+    for col in ("tienda", "tipo_banco"):
+        if col in bank.columns:
+            merged[col] = merged[col].combine_first(merged.get(f"{col}_rep", _pd.Series()))
+        elif f"{col}_rep" in merged.columns:
+            merged = merged.rename(columns={f"{col}_rep": col})
+
+    # Limpiar columnas auxiliares
+    drop_cols = ["_amt_key", "_date_key"] + [c for c in merged.columns if c.endswith("_rep")]
+    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+
+    return merged.reset_index(drop=True)
+
+
+# ============================================================
+# PIPELINE PRINCIPAL (importable desde Streamlit)
+# ============================================================
+
+# ============================================================
+# PREPARACIÓN DE DATAFRAMES (compartido por todas las variantes del pipeline)
+# ============================================================
+
+def _prepare_dataframes(bank_file_path, jde_file_path):
+    """
+    Parsea, normaliza, enriquece y valida los archivos de entrada.
+    Devuelve (bank_df, jde_df) listos para el motor de conciliación.
+    """
+    import pandas as _pd
+
+    if isinstance(bank_file_path, (str, Path)):
+        bank_file_paths = [bank_file_path]
+    else:
+        bank_file_paths = list(bank_file_path)
+
+    bank_dfs_raw       = []
+    reporte_caja_dfs   = []
+
+    for bp in bank_file_paths:
+        logger.info("Parseando archivo bancario: %s", bp)
+        raw = BankParser().parse(str(bp))
+        bank_name = raw["bank"].iloc[0] if ("bank" in raw.columns and not raw.empty) else ""
+        if bank_name == "REPORTE_CAJA":
+            reporte_caja_dfs.append(raw)
+        else:
+            bank_dfs_raw.append(raw)
+
+    if not bank_dfs_raw and reporte_caja_dfs:
+        logger.info("Solo REPORTE_CAJA disponible — usándolo como fuente bancaria.")
+        bank_dfs_raw     = reporte_caja_dfs
+        reporte_caja_dfs = []
+
+    logger.info("Parseando archivo JDE: %s", jde_file_path)
+    jde_raw_df = JDEParser().parse(jde_file_path)
+
+    logger.info("Normalizando movimientos bancarios...")
+    bank_normalized = [BankNormalizer().normalize(r) for r in bank_dfs_raw]
+    bank_df = (
+        _pd.concat(bank_normalized, ignore_index=True)
+        if len(bank_normalized) > 1
+        else bank_normalized[0]
+    )
+
+    if reporte_caja_dfs:
+        reporte_norm = _pd.concat(
+            [BankNormalizer().normalize(r) for r in reporte_caja_dfs],
+            ignore_index=True,
+        )
+        bank_df = _enrich_bank_with_reporte(bank_df, reporte_norm)
+        logger.info(
+            "Banco enriquecido con REPORTE_CAJA: %d movimientos con tienda",
+            bank_df["tienda"].notna().sum() if "tienda" in bank_df.columns else 0,
+        )
+
+    logger.info("Normalizando movimientos JDE...")
+    jde_df = JDENormalizer().normalize(jde_raw_df)
+
+    # Filtrar JDE por cuenta bancaria
+    bank_accounts = set(bank_df["account_id"].unique())
+    jde_filtered  = jde_df[jde_df["account_id"].isin(bank_accounts)].copy()
+
+    if jde_filtered.empty:
+        jde_account_ids  = jde_df["account_id"].unique()
+        matched_jde_ids: set = set()
+        for bank_acct in bank_accounts:
+            for jde_acct in jde_account_ids:
+                if bank_acct.endswith(jde_acct) or jde_acct.endswith(bank_acct):
+                    matched_jde_ids.add(jde_acct)
+
+        if matched_jde_ids:
+            jde_filtered = jde_df[jde_df["account_id"].isin(matched_jde_ids)].copy()
+            logger.info(
+                "Match por sufijo: cuenta bancaria %s -> JDE %s (%d movimientos)",
+                bank_accounts, matched_jde_ids, len(jde_filtered),
+            )
+
+    if jde_filtered.empty:
+        logger.warning(
+            "No se encontraron movimientos JDE para la(s) cuenta(s) bancaria(s): %s. "
+            "Se usarán todos los movimientos JDE.",
+            bank_accounts,
+        )
+        jde_filtered = jde_df
+    else:
+        logger.info(
+            "JDE filtrado a cuenta(s) %s: %d -> %d movimientos",
+            bank_accounts, len(jde_df), len(jde_filtered),
+        )
+
+    jde_df = jde_filtered
+
+    logger.info("Validando schema del DataFrame bancario...")
+    DataFrameSchemaValidator.validate_bank_dataframe(bank_df)
+    logger.info("Validando schema del DataFrame JDE...")
+    DataFrameSchemaValidator.validate_jde_dataframe(jde_df)
+
+    return bank_df, jde_df
+
+
+# ============================================================
+# PIPELINE PRINCIPAL (importable desde Streamlit / CLI)
+# ============================================================
+
+def run_pipeline(
+    bank_file_path,          # str  o  list[str]
+    jde_file_path: str,
+    output_dir: str,
+) -> dict:
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    bank_df, jde_df = _prepare_dataframes(bank_file_path, jde_file_path)
+
+    logger.info(
+        "Iniciando conciliación: %d movimientos banco | %d movimientos JDE",
+        len(bank_df), len(jde_df),
+    )
+    engine  = ReconciliationEngine()
+    results = engine.reconcile(bank_df, jde_df)
+
+    logger.info("Generando reporte Excel en: %s", output_dir)
+    reporter   = ExcelReporter()
+    report_path = reporter.generate(results, output_path)
+
+    _print_summary(results["summary"], report_path)
+    return results
+
+
+# ============================================================
+# PIPELINE INTERACTIVO — FASE 1 (Streamlit: proponer agrupaciones)
+# ============================================================
+
+def run_pipeline_stage1(
+    bank_file_path,   # str o list[str]
+    jde_file_path: str,
+) -> dict:
+    """
+    Parsea, normaliza, valida y ejecuta el matching exacto.
+    Devuelve las agrupaciones como *propuestas* (sin confirmar) para
+    que el usuario las revise en la UI antes de finalizar.
+
+    El dict devuelto se guarda en session_state y se pasa a
+    ``run_pipeline_stage2`` junto con los group_ids aprobados.
+    """
+    bank_df, jde_df = _prepare_dataframes(bank_file_path, jde_file_path)
+
+    logger.info(
+        "Stage 1 — matching exacto + propuesta de agrupaciones: "
+        "%d banco | %d JDE",
+        len(bank_df), len(jde_df),
+    )
+
+    engine = ReconciliationEngine()
+    interactive_result = engine.reconcile_interactive(bank_df, jde_df)
+
+    # ── Metadatos para el write-back del Papel de Trabajo ──
+    is_pt = str(jde_file_path).lower().endswith((".xlsx", ".xls"))
+    interactive_result["_jde_source_path"]   = str(jde_file_path)
+    interactive_result["_is_papel_trabajo"]  = is_pt
+
+    logger.info(
+        "Stage 1 completado — %d exactos | %d agrupaciones propuestas",
+        len(interactive_result["exact_matches"]),
+        len(interactive_result["proposed_grouped_matches"]),
+    )
+
+    return interactive_result
+
+
+# ============================================================
+# PIPELINE INTERACTIVO — FASE 2 (Streamlit: confirmar y reportar)
+# ============================================================
+
+def run_pipeline_stage2(
+    interactive_result: dict,
+    approved_group_ids: set,
+    output_dir: str,
+) -> dict:
+    """
+    Aplica los grupos aprobados por el usuario, construye el resultado
+    final y genera el reporte Excel.
+
+    Parámetros
+    ----------
+    interactive_result : dict
+        Resultado devuelto por ``run_pipeline_stage1`` (o
+        ``engine.reconcile_interactive``).
+    approved_group_ids : set[int]
+        ``group_id`` de las agrupaciones que el usuario aprobó.
+    output_dir : str
+        Directorio donde se guardará el reporte Excel.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    engine  = ReconciliationEngine()
+    results = engine.confirm_grouped_matches(interactive_result, approved_group_ids)
+
+    logger.info(
+        "Stage 2 — %d agrupaciones confirmadas | %d pendientes banco | %d pendientes JDE",
+        results["summary"]["grouped_matches_count"],
+        results["summary"]["pending_bank_count"],
+        results["summary"]["pending_jde_count"],
+    )
+
+    logger.info("Generando reporte Excel en: %s", output_dir)
+    reporter    = ExcelReporter()
+    report_path = reporter.generate(results, output_path)
+
+    _print_summary(results["summary"], report_path)
+    return results
+
+
+# ============================================================
+# RESUMEN EN CONSOLA
+# ============================================================
+
+def _print_summary(summary: dict, report_path) -> None:
+    print("\n" + "=" * 50)
+    print("  RESUMEN DE CONCILIACIÓN")
+    print("=" * 50)
+    print(f"  Movimientos banco         : {summary['total_bank_movements']}")
+    print(f"  Movimientos JDE           : {summary['total_jde_movements']}")
+    print(f"  Matches exactos           : {summary['exact_matches_count']}")
+    print(f"  Matches agrupados         : {summary['grouped_matches_count']}")
+    print(f"  Pendientes banco          : {summary['pending_bank_count']}")
+    print(f"  Pendientes JDE            : {summary['pending_jde_count']}")
+    print(f"  Reporte guardado en       : {report_path}")
+    print("=" * 50 + "\n")
+
+
+# ============================================================
+# ENTRADA CLI
+# ============================================================
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Motor de conciliación bancaria (CLI)"
+    )
+    parser.add_argument(
+        "--bank",
+        required=True,
+        nargs="+",
+        metavar="ARCHIVO",
+        help="Ruta(s) al archivo(s) de movimientos bancarios (se pueden pasar varios)",
+    )
+    parser.add_argument(
+        "--jde",
+        required=True,
+        metavar="ARCHIVO",
+        help="Ruta al archivo de movimientos JDE",
+    )
+    parser.add_argument(
+        "--output",
+        required=False,
+        default="data/output/reconciliations/",
+        metavar="DIRECTORIO",
+        help="Directorio de salida para el reporte (default: data/output/reconciliations/)",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+
+    try:
+        run_pipeline(
+            bank_file_path=args.bank,   # ya es lista por nargs="+"
+            jde_file_path=args.jde,
+            output_dir=args.output,
+        )
+    except SchemaValidationError as exc:
+        logger.error("Error de validación: %s", exc)
+        sys.exit(1)
+    except FileNotFoundError as exc:
+        logger.error("Archivo no encontrado: %s", exc)
+        sys.exit(1)
+    except Exception as exc:
+        logger.exception("Error inesperado: %s", exc)
+        sys.exit(1)

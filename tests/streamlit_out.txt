@@ -1,0 +1,35 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://172.16.11.17:8501
+  External URL: http://201.131.239.92:8501
+
+2026-03-02 12:28:18 | INFO     | main | Parseando archivo bancario: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\6614.csv
+2026-03-02 12:28:18 | INFO     | src.parsers.bank_parser | Parseando banco: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\6614.csv
+2026-03-02 12:28:19 | INFO     | src.parsers.bank_parser | Formato bancario detectado: BBVA
+2026-03-02 12:28:19 | INFO     | src.parsers.bank_parser | [BBVA] Cuenta detectada: 0884166614
+2026-03-02 12:28:20 | INFO     | src.parsers.bank_parser | [BBVA] Filas parseadas: 53
+2026-03-02 12:28:20 | INFO     | main | Parseando archivo bancario: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\REPORTE CAJA.xlsx
+2026-03-02 12:28:20 | INFO     | src.parsers.bank_parser | Parseando banco: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\REPORTE CAJA.xlsx
+2026-03-02 12:28:20 | INFO     | src.parsers.bank_parser | Formato bancario detectado: REPORTE_CAJA
+2026-03-02 12:28:21 | INFO     | src.parsers.bank_parser | [REPORTE_CAJA] Cuentas detectadas: ['6614', '7133', '1817']
+2026-03-02 12:28:21 | INFO     | src.parsers.bank_parser | [REPORTE_CAJA] Filas parseadas: 44
+2026-03-02 12:28:21 | INFO     | main | Parseando archivo JDE: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\PAPEL DE TRABAJO TARJETAS .xlsx
+2026-03-02 12:28:21 | INFO     | src.parsers.jde_parser | Parseando JDE: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\PAPEL DE TRABAJO TARJETAS .xlsx
+2026-03-02 12:28:21 | INFO     | src.parsers.jde_parser | Archivo Excel detectado — usando PapelTrabajoParser
+2026-03-02 12:28:21 | INFO     | src.parsers.jde_parser | [PapelTrabajo] Leyendo: C:\Users\BECARI~2\AppData\Local\Temp\tmp_b2s8y85\PAPEL DE TRABAJO TARJETAS .xlsx
+2026-03-02 12:28:23 | INFO     | src.parsers.jde_parser | [PapelTrabajo] Hoja 'AUX CONTABLE' — header en fila 13, 3195 filas de datos
+2026-03-02 12:28:23 | INFO     | src.parsers.jde_parser | [PapelTrabajo] 586 movimientos pendientes en 2 cuenta(s): ['6614', '7133']
+2026-03-02 12:28:23 | INFO     | main | Normalizando movimientos bancarios...
+2026-03-02 12:28:24 | INFO     | src.normalizers.bank_normalizer | [BANK] Movimientos normalizados: 53
+2026-03-02 12:28:24 | INFO     | src.normalizers.bank_normalizer | [BANK] Movimientos normalizados: 44
+2026-03-02 12:28:24 | INFO     | main | Banco enriquecido con REPORTE_CAJA: 32 movimientos con tienda
+2026-03-02 12:28:24 | INFO     | main | Normalizando movimientos JDE...
+2026-03-02 12:28:25 | INFO     | src.normalizers.jde_normalizer | [JDE] Movimientos normalizados: 585
+2026-03-02 12:28:25 | INFO     | main | Match por sufijo: cuenta bancaria {'0884166614'} -> JDE {'6614'} (469 movimientos)
+2026-03-02 12:28:25 | INFO     | main | JDE filtrado a cuenta(s) {'0884166614'}: 585 -> 469 movimientos
+2026-03-02 12:28:25 | INFO     | main | Validando schema del DataFrame bancario...
+2026-03-02 12:28:25 | INFO     | main | Validando schema del DataFrame JDE...
+2026-03-02 12:28:25 | INFO     | main | Stage 1 — matching exacto + propuesta de agrupaciones: 53 banco | 469 JDE
+2026-03-02 12:28:26 | INFO     | main | Stage 1 completado — 0 exactos | 3 agrupaciones propuestas
