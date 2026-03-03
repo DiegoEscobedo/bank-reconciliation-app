@@ -280,23 +280,28 @@ class ReconciliationEngine:
 
     def _propose_grouped_matches(self, bank_dataframe, jde_dataframe):
         """
-        Recorre los movimientos bancarios no conciliados y propone
-        subconjuntos de movimientos JDE cuya suma coincida (con tolerancia)
-        con el monto bancario.
+        Genera propuestas de agrupación en DOS FASES para evitar que el
+        orden de procesamiento cause que un movimiento bancario "consuma"
+        registros JDE que otro necesita con mayor precisión.
 
-        NO marca ``is_matched`` en ningún DataFrame — eso lo hace
-        ``confirm_grouped_matches`` tras la revisión del usuario.
+        FASE 1 — Exploración global (sin reservar):
+            Para cada movimiento bancario pendiente busca el mejor subconjunto
+            JDE posible ignorando conflictos. Se obtiene una propuesta
+            candidata por banco.
 
-        Cada propuesta incluye snapshots completos de los registros para
-        que la UI pueda mostrar todos los datos sin acceder a los DFs.
+        FASE 2 — Resolución de conflictos:
+            Ordena todas las propuestas por precisión (menor diferencia de
+            monto → mayor prioridad). Acepta en orden; si una propuesta
+            comparte índices JDE con otra ya aceptada, intenta encontrar
+            un subconjunto alternativo usando solo los JDE aún disponibles.
+            Así ambos movimientos bancarios tienen la misma oportunidad de
+            quedar conciliados.
 
-        Campos devueltos por propuesta:
-            group_id, bank_row_index, bank_snapshot,
-            jde_row_indices, jde_snapshots, amount_difference, jde_count
+        NO marca ``is_matched`` — eso lo hace ``confirm_grouped_matches``.
         """
-        proposals: list          = []
-        reserved_jde: set        = set()   # índices JDE ya reservados
-        group_id: int            = 0
+
+        # ── FASE 1: exploración global sin reservar ──────────────────────
+        raw_proposals: list = []
 
         for bank_index, bank_row in bank_dataframe.iterrows():
 
@@ -306,10 +311,8 @@ class ReconciliationEngine:
             target_amount = round(bank_row["abs_amount"], self.rounding_decimals)
             bank_date     = bank_row["movement_date"]
 
-            # Candidatos: no conciliados, no reservados, dentro de ventana de fechas
             available_jde = jde_dataframe[
-                (~jde_dataframe.index.isin(reserved_jde))
-                & (jde_dataframe["is_matched"] == False)
+                (jde_dataframe["is_matched"] == False)
                 & (self._is_date_within_tolerance(
                     bank_date, jde_dataframe["movement_date"]
                 ))
@@ -341,18 +344,13 @@ class ReconciliationEngine:
                 continue
 
             matched_jde_indices = [idx for idx, _ in subset_result]
-            reserved_jde.update(matched_jde_indices)
-
             accumulated = round(
-                sum(
-                    round(r["abs_amount"], self.rounding_decimals)
-                    for _, r in subset_result
-                ),
+                sum(round(r["abs_amount"], self.rounding_decimals)
+                    for _, r in subset_result),
                 self.rounding_decimals,
             )
 
-            proposals.append({
-                "group_id":          group_id,
+            raw_proposals.append({
                 "bank_row_index":    bank_index,
                 "bank_snapshot":     bank_row.to_dict(),
                 "jde_row_indices":   matched_jde_indices,
@@ -361,9 +359,86 @@ class ReconciliationEngine:
                                            self.rounding_decimals),
                 "jde_count":         len(matched_jde_indices),
             })
-            group_id += 1
 
-        return proposals
+        # ── FASE 2: resolución de conflictos ─────────────────────────────
+        # Prioridad: menor |diferencia de monto|, en empate menos registros JDE
+        raw_proposals.sort(
+            key=lambda p: (abs(p["amount_difference"]), p["jde_count"])
+        )
+
+        reserved_jde: set  = set()
+        final_proposals: list = []
+        group_id: int      = 0
+
+        for proposal in raw_proposals:
+            jde_set = set(proposal["jde_row_indices"])
+
+            if jde_set.isdisjoint(reserved_jde):
+                # Sin conflicto → aceptar directamente
+                reserved_jde.update(jde_set)
+                proposal["group_id"] = group_id
+                final_proposals.append(proposal)
+                group_id += 1
+            else:
+                # Conflicto → reintentar con solo los JDE disponibles
+                bank_index    = proposal["bank_row_index"]
+                bank_row      = bank_dataframe.loc[bank_index]
+                target_amount = round(bank_row["abs_amount"], self.rounding_decimals)
+                bank_date     = bank_row["movement_date"]
+
+                alt_jde = jde_dataframe[
+                    (~jde_dataframe.index.isin(reserved_jde))
+                    & (jde_dataframe["is_matched"] == False)
+                    & (self._is_date_within_tolerance(
+                        bank_date, jde_dataframe["movement_date"]
+                    ))
+                ]
+
+                if alt_jde.empty:
+                    continue
+
+                alt_jde = self._filter_by_tienda(
+                    alt_jde, bank_row, jde_dataframe
+                )
+
+                alt_filtered = alt_jde[
+                    alt_jde["abs_amount"] <= target_amount + self.amount_tolerance
+                ].copy()
+
+                if alt_filtered.empty:
+                    continue
+
+                alt_candidates = list(
+                    alt_filtered.nsmallest(25, "abs_amount").iterrows()
+                )
+                alt_result = self._find_subset_sum_with_limit(
+                    alt_candidates, target_amount
+                )
+
+                if not alt_result:
+                    continue
+
+                alt_indices = [idx for idx, _ in alt_result]
+                reserved_jde.update(alt_indices)
+                alt_accumulated = round(
+                    sum(round(r["abs_amount"], self.rounding_decimals)
+                        for _, r in alt_result),
+                    self.rounding_decimals,
+                )
+
+                final_proposals.append({
+                    "group_id":          group_id,
+                    "bank_row_index":    bank_index,
+                    "bank_snapshot":     bank_row.to_dict(),
+                    "jde_row_indices":   alt_indices,
+                    "jde_snapshots":     [row.to_dict() for _, row in alt_result],
+                    "amount_difference": round(target_amount - alt_accumulated,
+                                               self.rounding_decimals),
+                    "jde_count":         len(alt_indices),
+                })
+                group_id += 1
+
+        return final_proposals
 
     # ============================================================
     # SUBSET SUM CON BACKTRACKING Y PODA
