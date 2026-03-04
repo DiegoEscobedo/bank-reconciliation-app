@@ -1,5 +1,5 @@
 AMOUNT_TOLERANCE = 0.10       # centavo máximo permitido (BBVA redondea diferente al JDE)
-DATE_TOLERANCE_DAYS = 1
+DATE_TOLERANCE_DAYS = 3       # cubre viernes → lunes y fines de semana largos
 MAX_GROUP_SIZE = 10           # más entradas por grupo (el filtro por tienda reduce candidatos)
 ROUND_DECIMALS = 2
 
