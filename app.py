@@ -268,7 +268,7 @@ if st.session_state.get("phase") == "validating":
                         "Tipo":        _safe(bank_snap, "tipo_banco",
                                              _safe(bank_snap, "movement_type")),
                     }]).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -287,7 +287,7 @@ if st.session_state.get("phase") == "validating":
                     })
                 st.dataframe(
                     pd.DataFrame(jde_rows).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
