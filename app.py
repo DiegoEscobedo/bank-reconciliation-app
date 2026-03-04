@@ -15,6 +15,8 @@ import streamlit as st
 from main import run_pipeline, run_pipeline_stage1, run_pipeline_stage2
 from src.reporting.excel_reporter import ExcelReporter
 from src.utils.logger import get_logger
+from src.parsers.conciliacion_parser import parse_conciliacion_excel, get_pending_summary
+from src.matching.historical_matcher import match_historical_pendientes, summarize_historical_matches
 
 logger = get_logger(__name__)
 
@@ -86,6 +88,19 @@ with st.sidebar:
         key="reporte_caja",
         help="Reporte de caja con abreviaturas de tienda y tipo de pago. "
              "Se usa para identificar a qué tienda pertenece cada movimiento."
+    )
+
+    st.markdown("---")
+    st.subheader("4. Conciliación anterior (opcional)")
+    st.caption(
+        "Sube el archivo de Conciliación Bancaria del mes anterior para "
+        "identificar qué pendientes históricos ya se resolvieron en el período actual."
+    )
+    concil_ant_file = st.file_uploader(
+        "Conciliación Bancaria anterior (.xlsx)",
+        type=["xlsx", "xls"],
+        key="concil_ant",
+        help="Archivo 'Conciliación Bancaria al DD-MM-AAAA.xlsx' con las hojas por cuenta."
     )
 
     st.markdown("---")
@@ -419,10 +434,11 @@ st.markdown("---")
 # TABS DE DETALLE
 # ════════════════════════════════════════════════════════════
 
-tab_conciliados, tab_pend_bank, tab_pend_jde = st.tabs([
+tab_conciliados, tab_pend_bank, tab_pend_jde, tab_historicos = st.tabs([
     f"✅ Conciliados ({summary['exact_matches_count'] + summary['grouped_matches_count']})",
     f"🔴 Pendientes Banco ({summary['pending_bank_count']})",
     f"🔴 Pendientes JDE ({summary['pending_jde_count']})",
+    "📋 Análisis Históricos",
 ])
 
 # ── Tab: Conciliados ─────────────────────────────────────────
@@ -475,3 +491,164 @@ with tab_pend_jde:
             width="stretch",
             height=450,
         )
+
+# ── Tab: Análisis Históricos ──────────────────────────────────
+with tab_historicos:
+    if concil_ant_file is None:
+        st.info(
+            "Para analizar pendientes históricos, sube el archivo de "
+            "**Conciliación Bancaria anterior** en el panel lateral (sección 4)."
+        )
+    else:
+        # Parsear el Excel histórico
+        with st.spinner("Leyendo pendientes históricos…"):
+            try:
+                hist_df = parse_conciliacion_excel(concil_ant_file.getvalue())
+            except Exception as exc:
+                st.error(f"❌ Error al leer la conciliación anterior: {exc}")
+                st.stop()
+
+        if hist_df.empty:
+            st.warning("No se encontraron pendientes en el archivo seleccionado.")
+        else:
+            hist_summary = get_pending_summary(hist_df)
+            st.markdown(f"### Pendientes en `{concil_ant_file.name}`")
+
+            # Métricas del archivo histórico
+            hc1, hc2, hc3, hc4, hc5 = st.columns(5)
+            hc1.metric("Total pendientes", hist_summary["total"])
+            hc2.metric("Sección Más (JDE)",  hist_summary["mas_count"],
+                       help="Registros en libros JDE no reflejados en banco")
+            hc3.metric("Sección Menos (Banco)", hist_summary["menos_count"],
+                       help="Registros en banco no reflejados en JDE")
+            hc4.metric("Monto Más",
+                       f"${hist_summary['mas_total']:,.2f}")
+            hc5.metric("Monto Menos",
+                       f"${hist_summary['menos_total']:,.2f}")
+
+            col_df, col_dt = st.columns(2)
+            with col_df:
+                if hist_summary["date_min"] and not pd.isnull(hist_summary["date_min"]):
+                    st.caption(f"Fecha más antigua: **{hist_summary['date_min'].strftime('%d/%m/%Y')}**")
+            with col_dt:
+                if hist_summary["date_max"] and not pd.isnull(hist_summary["date_max"]):
+                    st.caption(f"Fecha más reciente: **{hist_summary['date_max'].strftime('%d/%m/%Y')}**")
+
+            st.markdown("---")
+
+            # Cruzar contra el período actual
+            with st.spinner("Cruzando pendientes históricos con el período actual…"):
+                matched_df = match_historical_pendientes(
+                    hist_df=hist_df,
+                    conciliated_bank=results.get("conciliated_bank_movements"),
+                    conciliated_jde=results.get("conciliated_jde_movements"),
+                    pending_bank=results.get("pending_bank_movements"),
+                    pending_jde=results.get("pending_jde_movements"),
+                )
+
+            stats = summarize_historical_matches(matched_df)
+            st.markdown("### Resultado del cruce con el período actual")
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("✅ Conciliados (este período)",
+                       stats["conciliado"],
+                       help="Montos que ahora aparecen conciliados en banco o JDE")
+            sc2.metric("🟡 Pendiente Banco",
+                       stats["pendiente_banco"],
+                       help="El monto ya llegó al banco pero no tiene match JDE")
+            sc3.metric("🟠 Pendiente JDE",
+                       stats["pendiente_jde"],
+                       help="El monto ya está en JDE pero no tiene match banco")
+            sc4.metric("🔴 Sigue Pendiente",
+                       stats["aun_pendiente"],
+                       help="No se encontró en el período actual")
+
+            st.caption(
+                f"**{stats['pct_resuelto']}%** de los pendientes históricos "
+                f"se encontraron en el período actual  |  "
+                f"Monto resuelto: **${stats['monto_resuelto']:,.2f}**  |  "
+                f"Monto aún pendiente: **${stats['monto_aun_pendiente']:,.2f}**"
+            )
+
+            st.markdown("---")
+
+            # Filtro de estado
+            estados_disp = sorted(matched_df["match_status"].unique().tolist())
+            estado_sel = st.multiselect(
+                "Filtrar por estado:",
+                options=estados_disp,
+                default=estados_disp,
+                key="hist_estado_filter",
+            )
+            seccion_sel = st.multiselect(
+                "Filtrar por sección:",
+                options=["mas", "menos"],
+                default=["mas", "menos"],
+                key="hist_seccion_filter",
+            )
+
+            disp_hist = matched_df[
+                matched_df["match_status"].isin(estado_sel) &
+                matched_df["section"].isin(seccion_sel)
+            ].copy()
+
+            if disp_hist.empty:
+                st.info("No hay registros con los filtros seleccionados.")
+            else:
+                # Formatear para visualización
+                disp_h = disp_hist[[
+                    "account_id", "section", "movement_date",
+                    "description", "abs_amount", "type_code",
+                    "match_status", "match_detail", "match_date", "match_amount",
+                ]].copy()
+
+                disp_h.columns = [
+                    "Cuenta", "Sección", "Fecha Hist.",
+                    "Descripción (histórico)", "Monto Hist.", "Tipo",
+                    "Estado", "Desc. Período Actual", "Fecha Actual", "Monto Actual",
+                ]
+
+                # Formateo fechas
+                for col_f in ("Fecha Hist.", "Fecha Actual"):
+                    disp_h[col_f] = pd.to_datetime(disp_h[col_f], errors="coerce").apply(
+                        lambda x: x.strftime("%d/%m/%Y") if not pd.isnull(x) else ""
+                    )
+
+                # Color por estado
+                _STATUS_COLORS = {
+                    "CONCILIADO":      "background-color: #D6F4D0",
+                    "PENDIENTE_BANCO": "background-color: #FFF3CC",
+                    "PENDIENTE_JDE":   "background-color: #FFE5CC",
+                    "AUN_PENDIENTE":   "background-color: #FFD6D6",
+                }
+
+                def _color_row(row):
+                    color = _STATUS_COLORS.get(row["Estado"], "")
+                    return [color] * len(row)
+
+                styled = (
+                    disp_h.style
+                    .apply(_color_row, axis=1)
+                    .format({
+                        "Monto Hist.":   "{:,.2f}",
+                        "Monto Actual":  lambda x: f"{x:,.2f}" if pd.notnull(x) and x == x else "",
+                    })
+                )
+
+                st.dataframe(styled, width="stretch", height=500, hide_index=True)
+
+                # Descargar como Excel
+                @st.cache_data(show_spinner=False)
+                def _to_excel_bytes(df: pd.DataFrame) -> bytes:
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                        df.to_excel(writer, index=False, sheet_name="Históricos")
+                    return buf.getvalue()
+
+                excel_hist_bytes = _to_excel_bytes(disp_h)
+                st.download_button(
+                    label="⬇ Descargar análisis histórico (Excel)",
+                    data=excel_hist_bytes,
+                    file_name="historicos_conciliacion.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
