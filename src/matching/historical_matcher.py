@@ -6,6 +6,10 @@ Lógica:
   Para cada pendiente histórico, busca si ya aparece en el periodo actual
   (ya sea en los movimientos conciliados o en los pendientes actuales).
 
+  Secciones del archivo histórico:
+    'mas'   → registro que está en banco pero aún no en JDE
+    'menos' → registro que está en JDE pero aún no en banco
+
   Criterio de coincidencia:
     • Monto: |hist - actual| ≤ AMOUNT_TOLERANCE
     • Fecha: |hist - actual| ≤ HIST_DATE_TOLERANCE_DAYS (más amplio, puede ser cualquier mes)

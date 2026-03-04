@@ -517,13 +517,13 @@ with tab_historicos:
             # Métricas del archivo histórico
             hc1, hc2, hc3, hc4, hc5 = st.columns(5)
             hc1.metric("Total pendientes", hist_summary["total"])
-            hc2.metric("Sección Más (JDE)",  hist_summary["mas_count"],
-                       help="Registros en libros JDE no reflejados en banco")
-            hc3.metric("Sección Menos (Banco)", hist_summary["menos_count"],
-                       help="Registros en banco no reflejados en JDE")
-            hc4.metric("Monto Más",
+            hc2.metric("Sección Más (Banco)",  hist_summary["mas_count"],
+                       help="Registros en banco que aún no están en JDE")
+            hc3.metric("Sección Menos (JDE)", hist_summary["menos_count"],
+                       help="Registros en JDE que el banco aún no ha reflejado")
+            hc4.metric("Monto Más (Banco)",
                        f"${hist_summary['mas_total']:,.2f}")
-            hc5.metric("Monto Menos",
+            hc5.metric("Monto Menos (JDE)",
                        f"${hist_summary['menos_total']:,.2f}")
 
             col_df, col_dt = st.columns(2)
@@ -552,16 +552,16 @@ with tab_historicos:
             sc1, sc2, sc3, sc4 = st.columns(4)
             sc1.metric("✅ Conciliados (este período)",
                        stats["conciliado"],
-                       help="Montos que ahora aparecen conciliados en banco o JDE")
+                       help="Ya se pudo conciliar: aparece tanto en banco como en JDE")
             sc2.metric("🟡 Pendiente Banco",
                        stats["pendiente_banco"],
-                       help="El monto ya llegó al banco pero no tiene match JDE")
+                       help="Sigue en pendientes de banco: el banco lo tiene, falta en JDE")
             sc3.metric("🟠 Pendiente JDE",
                        stats["pendiente_jde"],
-                       help="El monto ya está en JDE pero no tiene match banco")
+                       help="Sigue en pendientes de JDE: los libros lo tienen, el banco aún no lo refleja")
             sc4.metric("🔴 Sigue Pendiente",
                        stats["aun_pendiente"],
-                       help="No se encontró en el período actual")
+                       help="No se encontró en ninguna categoría del período actual")
 
             st.caption(
                 f"**{stats['pct_resuelto']}%** de los pendientes históricos "

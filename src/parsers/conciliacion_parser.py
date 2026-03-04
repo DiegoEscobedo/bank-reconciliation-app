@@ -156,8 +156,10 @@ def parse_conciliacion_excel(file_path: Union[str, bytes]) -> pd.DataFrame:
     -------
     pd.DataFrame con columnas:
         account_id      str   – nombre de la hoja (número de cuenta, ej: '6614')
-        section         str   – 'mas'  = en JDE no en banco
-                                'menos' = en banco no en JDE
+        section         str   – 'mas'   = en banco pero NO en JDE
+                                         (el banco ya lo registró, falta en libros)
+                                'menos' = en JDE pero NO en banco
+                                         (libros ya lo tienen, el banco aún no lo refleja)
         movement_date   Timestamp | NaT
         description     str   – texto completo de la celda (incluyendo prefijo de fecha)
         abs_amount      float – monto positivo
