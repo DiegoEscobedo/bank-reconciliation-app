@@ -258,6 +258,14 @@ class ExcelReporter:
         Marca como conciliadas en el Papel de Trabajo las filas que
         corresponden a los Aux_Fact proporcionados.
 
+        Estrategia ZIP-patch:
+          1. openpyxl hace los cambios de datos en memoria.
+          2. Al construir el archivo de salida se toma SOLO el XML de la hoja
+             AUX CONTABLE (y sharedStrings) del resultado de openpyxl.
+          3. El resto del ZIP (tablas dinámicas, estilos, filtros, formatos
+             condicionales, otras hojas) se copia del archivo ORIGINAL sin
+             modificar — así se preserva todo el formato original.
+
         Parámetros
         ----------
         source_path : str
@@ -271,60 +279,151 @@ class ExcelReporter:
         -------
         bytes — contenido del Excel modificado listo para descarga.
         """
+        import zipfile
+        from xml.etree import ElementTree as ET
+
         if match_date is None:
             match_date = date.today()
 
-        wb = openpyxl.load_workbook(source_path)
+        # ── 1. Localizar encabezados y filas a marcar (data_only=True) ──
+        # Las celdas de Aux_Fact contienen fórmulas estructuradas de tabla
+        # (ej. =Tabla3[[#This Row],[Número batch]]); con data_only=True
+        # openpyxl devuelve el valor cacheado (el número real), no la fórmula.
+        wb_ro = openpyxl.load_workbook(source_path, data_only=True)
 
         sheet_name = next(
-            (s for s in ("AUX CONTABLE", "Detalle1") if s in wb.sheetnames),
+            (s for s in ("AUX CONTABLE", "Detalle1") if s in wb_ro.sheetnames),
             None,
         )
         if sheet_name is None:
             raise ValueError("No se encontró la hoja 'AUX CONTABLE' en el archivo.")
 
-        ws = wb[sheet_name]
+        ws_ro = wb_ro[sheet_name]
 
-        # ── Localizar columnas por encabezado ────────────────
         header_row_idx = None
-        col_aux  = None
-        col_conc = None
-        col_fecha = None
+        col_aux = col_conc = col_fecha = None
 
-        for row in ws.iter_rows():
-            vals = [str(c.value).strip() if c.value is not None else "" for c in row]
-            if "Aux_Fact" in vals and "Importe" in vals:
+        for row in ws_ro.iter_rows():
+            header_map: dict[str, int] = {}
+            for cell in row:
+                v = str(cell.value).strip() if cell.value is not None else ""
+                if v:
+                    header_map[v] = cell.column
+            if "Aux_Fact" in header_map and ("Importe" in header_map or "CONCILIADO" in header_map):
                 header_row_idx = row[0].row
-                for cell in row:
-                    v = str(cell.value).strip() if cell.value else ""
-                    if v == "Aux_Fact":
-                        col_aux = cell.column
-                    elif v == "CONCILIADO":
-                        col_conc = cell.column
-                    elif v == "FECHA CONCILIACION":
-                        col_fecha = cell.column
+                col_aux   = header_map.get("Aux_Fact")
+                col_conc  = header_map.get("CONCILIADO")
+                col_fecha = header_map.get("FECHA CONCILIACION")
                 break
 
         if header_row_idx is None or col_aux is None:
-            raise ValueError("No se pudo localizar el encabezado en la hoja AUX CONTABLE.")
+            raise ValueError("No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE.")
 
+        # Identificar números de fila que coinciden
         reconciled_set = {str(v).strip() for v in reconciled_aux_facts}
-        updated = 0
+        rows_to_mark: list[int] = []
 
-        for row in ws.iter_rows(min_row=header_row_idx + 1):
-            aux_cell = row[col_aux - 1]
-            aux_val = str(aux_cell.value).strip() if aux_cell.value is not None else ""
+        for row in ws_ro.iter_rows(min_row=header_row_idx + 1):
+            cell_val = row[col_aux - 1].value
+            aux_val = str(cell_val).strip() if cell_val is not None else ""
             if aux_val in reconciled_set:
-                if col_conc:
-                    ws.cell(row=row[0].row, column=col_conc, value="Sí")
-                if col_fecha:
-                    ws.cell(row=row[0].row, column=col_fecha, value=match_date)
-                updated += 1
+                rows_to_mark.append(row[0].row)
 
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return buf.read()
+        wb_ro.close()
+
+        # ── 2. Abrir sin data_only y escribir en las filas identificadas ──
+        # Así se preservan TODAS las fórmulas del workbook.
+        wb = openpyxl.load_workbook(source_path)
+        ws = wb[sheet_name]
+
+        for row_num in rows_to_mark:
+            if col_conc:
+                ws.cell(row=row_num, column=col_conc).value = "Sí"
+            if col_fecha:
+                ws.cell(row=row_num, column=col_fecha).value = match_date
+
+        updated = len(rows_to_mark)
+
+        # Guardar versión modificada en buffer temporal
+        modified_buf = io.BytesIO()
+        wb.save(modified_buf)
+        modified_buf.seek(0)
+        wb.close()
+
+        # ── 3. Identificar la ruta ZIP interna de AUX CONTABLE ───
+        # en el archivo ORIGINAL (antes de que openpyxl lo renumere)
+        def _find_sheet_zip_path(zip_file: zipfile.ZipFile, target_sheet_name: str) -> str | None:
+            """Devuelve el path interno (ej. xl/worksheets/sheet5.xml) de la hoja."""
+            try:
+                wb_xml  = zip_file.read("xl/workbook.xml")
+                rel_xml = zip_file.read("xl/_rels/workbook.xml.rels")
+            except KeyError:
+                return None
+
+            wb_tree  = ET.fromstring(wb_xml)
+            rel_tree = ET.fromstring(rel_xml)
+
+            # rId → Target
+            rels: dict[str, str] = {
+                el.get("Id"): el.get("Target")
+                for el in rel_tree
+                if el.get("Target", "").startswith("worksheets/")
+            }
+
+            # Buscar la hoja por nombre
+            r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            for el in wb_tree.iter():
+                if el.get("name") == target_sheet_name:
+                    r_id = el.get(f"{{{r_ns}}}id")
+                    if r_id and r_id in rels:
+                        return "xl/" + rels[r_id]
+            return None
+
+        with zipfile.ZipFile(source_path, "r") as orig_zip:
+            orig_sheet_path = _find_sheet_zip_path(orig_zip, sheet_name)
+
+        with zipfile.ZipFile(modified_buf, "r") as mod_zip:
+            mod_sheet_path = _find_sheet_zip_path(mod_zip, sheet_name)
+
+        if orig_sheet_path is None or mod_sheet_path is None:
+            # Fallback: devolver la versión de openpyxl sin patch
+            modified_buf.seek(0)
+            return modified_buf.read()
+
+        # ── 3. Construir ZIP de salida mezclando original + parche ─
+        # Archivos que se toman de la versión modificada:
+        #   - hoja AUX CONTABLE  → datos actualizados
+        #   - sharedStrings.xml  → puede incluir "Sí" como string nuevo
+        # Todo lo demás (tablas dinámicas, estilos, otras hojas) → original
+        files_from_modified = {
+            orig_sheet_path,          # worksheet con Sí marcados
+            "xl/sharedStrings.xml",   # cadenas compartidas actualizadas
+        }
+
+        output_buf = io.BytesIO()
+        with zipfile.ZipFile(source_path, "r") as orig_zip, \
+             zipfile.ZipFile(modified_buf, "r") as mod_zip, \
+             zipfile.ZipFile(output_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
+
+            for item in orig_zip.infolist():
+                name = item.filename
+                if name in files_from_modified:
+                    # Leer el equivalente en la versión modificada
+                    # (puede tener nombre distinto para la hoja)
+                    if name == orig_sheet_path:
+                        src = mod_sheet_path
+                    else:
+                        src = name
+                    try:
+                        data = mod_zip.read(src)
+                    except KeyError:
+                        data = orig_zip.read(name)
+                else:
+                    data = orig_zip.read(name)
+                out_zip.writestr(item, data)
+
+        output_buf.seek(0)
+        return output_buf.read()
 
     @staticmethod
     def _safe_get_row(df: pd.DataFrame, idx) -> dict:
