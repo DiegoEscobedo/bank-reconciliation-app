@@ -402,7 +402,15 @@ class ExcelReporter:
         #   a) Fórmula con valor cacheado: <c r="A14"><f>...</f><v>2647414</v></c>
         #   b) Valor numérico directo:     <c r="A14"><v>2647414</v></c>
         #   c) Shared string t="s":        <c r="A14" t="s"><v>IDX</v></c>
-        reconciled_set = {str(v).strip() for v in reconciled_aux_facts}
+        # Normalizar: "2647414.0" y "2647414" deben ser equivalentes
+        reconciled_set: set[str] = set()
+        for v in reconciled_aux_facts:
+            sv = str(v).strip()
+            reconciled_set.add(sv)
+            try:
+                reconciled_set.add(str(int(float(sv))))
+            except (ValueError, OverflowError):
+                pass
         rows_to_mark: list[int] = []
 
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):

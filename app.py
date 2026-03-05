@@ -391,10 +391,17 @@ if _dl_cols:
         # Recopilar Aux_Facts de los movimientos JDE conciliados
         _conciliados_jde = results.get("conciliated_jde_movements", pd.DataFrame())
         if "_aux_fact" in _conciliados_jde.columns:
-            _aux_facts = [
-                v for v in _conciliados_jde["_aux_fact"].dropna().unique()
-                if str(v).strip() not in ("", "nan", "None")
-            ]
+            _aux_facts = []
+            for _v in _conciliados_jde["_aux_fact"].dropna().unique():
+                _sv = str(_v).strip()
+                if _sv in ("", "nan", "None"):
+                    continue
+                # Normalizar float a entero: "2647414.0" → "2647414"
+                try:
+                    _sv = str(int(float(_sv)))
+                except (ValueError, OverflowError):
+                    pass
+                _aux_facts.append(_sv)
         else:
             _aux_facts = []
 
