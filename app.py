@@ -168,6 +168,10 @@ if run_btn:
                     bank_file_path=bank_paths,
                     jde_file_path=str(jde_path),
                 )
+                # Guardar los bytes del Papel de Trabajo DENTRO del with,
+                # antes de que el TemporaryDirectory sea destruido.
+                if stage1_data.get("_is_papel_trabajo"):
+                    stage1_data["_jde_bytes"] = jde_file.getvalue()
 
             st.session_state["stage1_data"] = stage1_data
 
@@ -394,12 +398,13 @@ if _dl_cols:
         else:
             _aux_facts = []
 
-        _pt_path = results.get("_jde_source_path", "")
-        if _pt_path and _aux_facts:
+        # Usar bytes guardados (el TemporaryDirectory ya fue destruido)
+        _pt_source = results.get("_jde_bytes") or results.get("_jde_source_path", "")
+        if _pt_source and _aux_facts:
             try:
                 _reporter = ExcelReporter()
                 _pt_bytes = _reporter.write_back_conciliados(
-                    _pt_path, _aux_facts
+                    _pt_source, _aux_facts
                 )
                 with _dl_buttons[_btn_idx]:
                     st.download_button(

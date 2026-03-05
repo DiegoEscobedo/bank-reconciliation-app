@@ -138,6 +138,7 @@ class ReconciliationEngine:
             "_jde_df_full":               jde_df,
             # Pass-through metadata de la fuente JDE
             "_jde_source_path":           interactive_result.get("_jde_source_path"),
+            "_jde_bytes":                 interactive_result.get("_jde_bytes"),
             "_is_papel_trabajo":          interactive_result.get("_is_papel_trabajo", False),
         }
 

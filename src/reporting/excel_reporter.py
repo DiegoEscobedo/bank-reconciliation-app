@@ -250,7 +250,7 @@ class ExcelReporter:
 
     def write_back_conciliados(
         self,
-        source_path: str,
+        source: "str | bytes",
         reconciled_aux_facts: list,
         match_date: "date | None" = None,
     ) -> bytes:
@@ -258,18 +258,23 @@ class ExcelReporter:
         Marca como conciliadas en el Papel de Trabajo las filas que
         corresponden a los Aux_Fact proporcionados.
 
-        Estrategia ZIP-patch:
-          1. openpyxl hace los cambios de datos en memoria.
-          2. Al construir el archivo de salida se toma SOLO el XML de la hoja
-             AUX CONTABLE (y sharedStrings) del resultado de openpyxl.
-          3. El resto del ZIP (tablas dinámicas, estilos, filtros, formatos
-             condicionales, otras hojas) se copia del archivo ORIGINAL sin
-             modificar — así se preserva todo el formato original.
+        Estrategia: parche directo sobre el XML del ZIP original.
+          1. openpyxl (data_only=True) solo LEE los valores cacheados para
+             identificar qué filas marcar — nunca escribe nada.
+          2. El XML del worksheet AUX CONTABLE se parchea directamente con
+             regex/string: se insertan celdas AT (CONCILIADO="SÍ") y AU
+             (FECHA) justo antes de </row> de cada fila a marcar.
+          3. "SÍ" se agrega a sharedStrings.xml (el índice nuevo se usa en
+             las celdas parcheadas). La fecha se escribe como inline string.
+          4. El ZIP de salida es IDÉNTICO al original excepto por los dos
+             archivos cambiados (worksheet + sharedStrings).  Así se
+             preservan 100 %: filtros, colores, formatos condicionales,
+             tablas, tablas dinámicas, estilos de celda, etc.
 
         Parámetros
         ----------
-        source_path : str
-            Ruta al Papel de Trabajo original (.xlsx).
+        source : str | bytes
+            Ruta al Papel de Trabajo original (.xlsx) O sus bytes directos.
         reconciled_aux_facts : list
             Lista de valores Aux_Fact (str/int) a marcar.
         match_date : date, opcional
@@ -279,148 +284,258 @@ class ExcelReporter:
         -------
         bytes — contenido del Excel modificado listo para descarga.
         """
+        import re
         import zipfile
         from xml.etree import ElementTree as ET
 
         if match_date is None:
             match_date = date.today()
 
-        # ── 1. Localizar encabezados y filas a marcar (data_only=True) ──
-        # Las celdas de Aux_Fact contienen fórmulas estructuradas de tabla
-        # (ej. =Tabla3[[#This Row],[Número batch]]); con data_only=True
-        # openpyxl devuelve el valor cacheado (el número real), no la fórmula.
-        wb_ro = openpyxl.load_workbook(source_path, data_only=True)
+        # Normalizar source a bytes en memoria
+        if isinstance(source, (bytes, bytearray)):
+            src_bytes = bytes(source)
+        else:
+            with open(source, "rb") as f:
+                src_bytes = f.read()
 
-        sheet_name = next(
-            (s for s in ("AUX CONTABLE", "Detalle1") if s in wb_ro.sheetnames),
-            None,
-        )
-        if sheet_name is None:
-            raise ValueError("No se encontró la hoja 'AUX CONTABLE' en el archivo.")
+        src_buf = io.BytesIO(src_bytes)
 
-        ws_ro = wb_ro[sheet_name]
-
-        header_row_idx = None
-        col_aux = col_conc = col_fecha = None
-
-        for row in ws_ro.iter_rows():
-            header_map: dict[str, int] = {}
-            for cell in row:
-                v = str(cell.value).strip() if cell.value is not None else ""
-                if v:
-                    header_map[v] = cell.column
-            if "Aux_Fact" in header_map and ("Importe" in header_map or "CONCILIADO" in header_map):
-                header_row_idx = row[0].row
-                col_aux   = header_map.get("Aux_Fact")
-                col_conc  = header_map.get("CONCILIADO")
-                col_fecha = header_map.get("FECHA CONCILIACION")
-                break
-
-        if header_row_idx is None or col_aux is None:
-            raise ValueError("No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE.")
-
-        # Identificar números de fila que coinciden
-        reconciled_set = {str(v).strip() for v in reconciled_aux_facts}
-        rows_to_mark: list[int] = []
-
-        for row in ws_ro.iter_rows(min_row=header_row_idx + 1):
-            cell_val = row[col_aux - 1].value
-            aux_val = str(cell_val).strip() if cell_val is not None else ""
-            if aux_val in reconciled_set:
-                rows_to_mark.append(row[0].row)
-
-        wb_ro.close()
-
-        # ── 2. Abrir sin data_only y escribir en las filas identificadas ──
-        # Así se preservan TODAS las fórmulas del workbook.
-        wb = openpyxl.load_workbook(source_path)
-        ws = wb[sheet_name]
-
-        for row_num in rows_to_mark:
-            if col_conc:
-                ws.cell(row=row_num, column=col_conc).value = "Sí"
-            if col_fecha:
-                ws.cell(row=row_num, column=col_fecha).value = match_date
-
-        updated = len(rows_to_mark)
-
-        # Guardar versión modificada en buffer temporal
-        modified_buf = io.BytesIO()
-        wb.save(modified_buf)
-        modified_buf.seek(0)
-        wb.close()
-
-        # ── 3. Identificar la ruta ZIP interna de AUX CONTABLE ───
-        # en el archivo ORIGINAL (antes de que openpyxl lo renumere)
-        def _find_sheet_zip_path(zip_file: zipfile.ZipFile, target_sheet_name: str) -> str | None:
-            """Devuelve el path interno (ej. xl/worksheets/sheet5.xml) de la hoja."""
-            try:
-                wb_xml  = zip_file.read("xl/workbook.xml")
-                rel_xml = zip_file.read("xl/_rels/workbook.xml.rels")
-            except KeyError:
-                return None
-
+        # ── 1. Parsear el ZIP sin openpyxl ────────────────────────────────────
+        # Leemos los XMLs directamente: evitamos que openpyxl reescriba nada.
+        with zipfile.ZipFile(src_buf, "r") as z:
+            # Encontrar ruta interna de la hoja AUX CONTABLE
+            wb_xml  = z.read("xl/workbook.xml")
+            rel_xml = z.read("xl/_rels/workbook.xml.rels")
             wb_tree  = ET.fromstring(wb_xml)
             rel_tree = ET.fromstring(rel_xml)
-
-            # rId → Target
-            rels: dict[str, str] = {
+            rels = {
                 el.get("Id"): el.get("Target")
                 for el in rel_tree
                 if el.get("Target", "").startswith("worksheets/")
             }
+            r_ns_key = (
+                "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+            )
+            sheet_name: str | None = None
+            sheet_zip_path: str | None = None
+            for candidate in ("AUX CONTABLE", "Detalle1"):
+                for el in wb_tree.iter():
+                    if el.get("name") == candidate:
+                        r_id = el.get(r_ns_key)
+                        if r_id and r_id in rels:
+                            sheet_name = candidate
+                            sheet_zip_path = "xl/" + rels[r_id]
+                            break
+                if sheet_zip_path:
+                    break
 
-            # Buscar la hoja por nombre
-            r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-            for el in wb_tree.iter():
-                if el.get("name") == target_sheet_name:
-                    r_id = el.get(f"{{{r_ns}}}id")
-                    if r_id and r_id in rels:
-                        return "xl/" + rels[r_id]
-            return None
+            if sheet_zip_path is None:
+                raise ValueError(
+                    "No se encontró la hoja 'AUX CONTABLE' en el archivo."
+                )
 
-        with zipfile.ZipFile(source_path, "r") as orig_zip:
-            orig_sheet_path = _find_sheet_zip_path(orig_zip, sheet_name)
+            orig_ws_bytes = z.read(sheet_zip_path)
+            orig_ss_bytes = z.read("xl/sharedStrings.xml")
+            all_entries: list[tuple] = [
+                (item, z.read(item.filename)) for item in z.infolist()
+            ]
 
-        with zipfile.ZipFile(modified_buf, "r") as mod_zip:
-            mod_sheet_path = _find_sheet_zip_path(mod_zip, sheet_name)
+        orig_ws_xml = orig_ws_bytes.decode("utf-8")
+        orig_ss_xml = orig_ss_bytes.decode("utf-8")
 
-        if orig_sheet_path is None or mod_sheet_path is None:
-            # Fallback: devolver la versión de openpyxl sin patch
-            modified_buf.seek(0)
-            return modified_buf.read()
+        # ── 2. Construir mapa de sharedStrings index → valor ─────────────────
+        # Cada <si> puede ser texto simple (<si><t>val</t></si>) o rich text
+        # (<si><r><rPr>...</rPr><t>val</t></r></si>).  Concatenamos todos los
+        # <t> de cada bloque para obtener el valor visible.
+        si_blocks = re.findall(r"<si>.*?</si>", orig_ss_xml, re.DOTALL)
+        ss_values: list[str] = [
+            "".join(re.findall(r"<t>([^<]*)</t>", blk))
+            for blk in si_blocks
+        ]
 
-        # ── 3. Construir ZIP de salida mezclando original + parche ─
-        # Archivos que se toman de la versión modificada:
-        #   - hoja AUX CONTABLE  → datos actualizados
-        #   - sharedStrings.xml  → puede incluir "Sí" como string nuevo
-        # Todo lo demás (tablas dinámicas, estilos, otras hojas) → original
-        files_from_modified = {
-            orig_sheet_path,          # worksheet con Sí marcados
-            "xl/sharedStrings.xml",   # cadenas compartidas actualizadas
-        }
+        # ── 3. Detectar fila de encabezado y columnas clave desde el XML ──────
+        # Buscamos la primera fila donde alguna celda t="s" tiene el valor
+        # "Aux_Fact" (cuyo índice en sharedStrings es típicamente 0).
+        target_col_names = {"Aux_Fact", "CONCILIADO", "FECHA CONCILIACION"}
+        header_row_idx: int | None = None
+        col_aux_letter: str | None = None
+        col_conc_letter: str | None = None
+        col_fecha_letter: str | None = None
 
-        output_buf = io.BytesIO()
-        with zipfile.ZipFile(source_path, "r") as orig_zip, \
-             zipfile.ZipFile(modified_buf, "r") as mod_zip, \
-             zipfile.ZipFile(output_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
+        # Iterar filas del worksheet XML buscando el encabezado
+        for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
+            row_txt = row_m.group()
+            r_m = re.search(r'\br="(\d+)"', row_txt)
+            if not r_m:
+                continue
+            rn = int(r_m.group(1))
 
-            for item in orig_zip.infolist():
-                name = item.filename
-                if name in files_from_modified:
-                    # Leer el equivalente en la versión modificada
-                    # (puede tener nombre distinto para la hoja)
-                    if name == orig_sheet_path:
-                        src = mod_sheet_path
-                    else:
-                        src = name
-                    try:
-                        data = mod_zip.read(src)
-                    except KeyError:
-                        data = orig_zip.read(name)
+            # Mapa col_letter → valor string en esta fila
+            cell_map: dict[str, str] = {}
+            for c_m in re.finditer(
+                r'<c\s+r="([A-Z]+)\d+"[^>]*t="s"[^>]*><v>(\d+)</v></c>',
+                row_txt,
+            ):
+                col_letter = c_m.group(1)
+                idx = int(c_m.group(2))
+                if idx < len(ss_values):
+                    cell_map[col_letter] = ss_values[idx]
+
+            if "Aux_Fact" in cell_map.values():
+                header_row_idx = rn
+                for col_ltr, val in cell_map.items():
+                    if val == "Aux_Fact":
+                        col_aux_letter = col_ltr
+                    elif val == "CONCILIADO":
+                        col_conc_letter = col_ltr
+                    elif val == "FECHA CONCILIACION":
+                        col_fecha_letter = col_ltr
+                break
+
+        if header_row_idx is None or col_aux_letter is None:
+            raise ValueError(
+                "No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE."
+            )
+
+        # ── 4. Identificar filas a marcar ────────────────────────────────────
+        # Aux_Fact puede ser:
+        #   a) Fórmula con valor cacheado: <c r="A14"><f>...</f><v>2647414</v></c>
+        #   b) Valor numérico directo:     <c r="A14"><v>2647414</v></c>
+        #   c) Shared string t="s":        <c r="A14" t="s"><v>IDX</v></c>
+        reconciled_set = {str(v).strip() for v in reconciled_aux_facts}
+        rows_to_mark: list[int] = []
+
+        for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
+            row_txt = row_m.group()
+            r_m = re.search(r'\br="(\d+)"', row_txt)
+            if not r_m:
+                continue
+            rn = int(r_m.group(1))
+            if rn <= header_row_idx:
+                continue
+
+            # Buscar la celda de Aux_Fact en esta fila
+            aux_cell_m = re.search(
+                rf'<c\s+r="{col_aux_letter}{rn}"[^>]*>(.*?)</c>',
+                row_txt, re.DOTALL,
+            )
+            if not aux_cell_m:
+                continue
+            aux_inner = aux_cell_m.group(1)
+
+            # Extraer valor
+            aux_val = ""
+            # Caso 1: tiene <v>
+            v_m = re.search(r"<v>([^<]+)</v>", aux_inner)
+            if v_m:
+                raw = v_m.group(1).strip()
+                # Si es shared string, resolver
+                t_attr_m = re.search(r't="s"', aux_cell_m.group(0))
+                if t_attr_m:
+                    idx = int(raw)
+                    aux_val = ss_values[idx] if idx < len(ss_values) else raw
                 else:
-                    data = orig_zip.read(name)
-                out_zip.writestr(item, data)
+                    # Valor numérico o texto; convertir a str de int si es posible
+                    try:
+                        aux_val = str(int(float(raw)))
+                    except ValueError:
+                        aux_val = raw
+
+            if aux_val in reconciled_set:
+                rows_to_mark.append(rn)
+
+        if not rows_to_mark:
+            return src_bytes
+
+        # ── 3. Agregar "SÍ" a sharedStrings.xml ─────────────────────────────
+        si_idx: int | None = None
+        for i, val in enumerate(ss_values):
+            if val == "SÍ":
+                si_idx = i
+                break
+
+        if si_idx is None:
+            si_idx = len(ss_values)     # nuevo índice (0-based = actual count)
+            new_ss_xml = orig_ss_xml.replace("</sst>", "<si><t>SÍ</t></si></sst>")
+            # Actualizar contadores de atributos count / uniqueCount
+            new_ss_xml = re.sub(
+                r'count="(\d+)"',
+                lambda m: f'count="{int(m.group(1)) + len(rows_to_mark)}"',
+                new_ss_xml, count=1,
+            )
+            new_ss_xml = re.sub(
+                r'uniqueCount="(\d+)"',
+                lambda m: f'uniqueCount="{int(m.group(1)) + 1}"',
+                new_ss_xml, count=1,
+            )
+        else:
+            new_ss_xml = orig_ss_xml
+
+        # ── 4. Parchear el worksheet XML directamente ────────────────────────
+        # Para cada fila a marcar: eliminar celdas AT / AU existentes e
+        # insertar las nuevas antes de </row>.
+        rows_set = set(rows_to_mark)
+        date_str = match_date.strftime("%d/%m/%Y")
+
+        def _patch_row(m: re.Match) -> str:
+            row_txt = m.group(0)
+            r_match = re.search(r'\br="(\d+)"', row_txt)
+            if not r_match:
+                return row_txt
+            rn = int(r_match.group(1))
+            if rn not in rows_set:
+                return row_txt
+
+            # Quitar celdas AT y AU actuales si existen
+            if col_conc_letter:
+                row_txt = re.sub(
+                    rf'<c\s+r="{col_conc_letter}{rn}"[^/]*/>', "", row_txt
+                )
+                row_txt = re.sub(
+                    rf'<c\s+r="{col_conc_letter}{rn}"[^>]*>.*?</c>', "",
+                    row_txt, flags=re.DOTALL,
+                )
+            if col_fecha_letter:
+                row_txt = re.sub(
+                    rf'<c\s+r="{col_fecha_letter}{rn}"[^/]*/>', "", row_txt
+                )
+                row_txt = re.sub(
+                    rf'<c\s+r="{col_fecha_letter}{rn}"[^>]*>.*?</c>', "",
+                    row_txt, flags=re.DOTALL,
+                )
+
+            # Construir nuevas celdas
+            new_cells = ""
+            if col_conc_letter:
+                # Shared string → mismo aspecto que el resto de strings del archivo
+                new_cells += (
+                    f'<c r="{col_conc_letter}{rn}" t="s"><v>{si_idx}</v></c>'
+                )
+            if col_fecha_letter:
+                # Inline string para la fecha (evita depender de estilos numéricos)
+                new_cells += (
+                    f'<c r="{col_fecha_letter}{rn}" t="inlineStr">'
+                    f"<is><t>{date_str}</t></is></c>"
+                )
+
+            return row_txt.replace("</row>", new_cells + "</row>")
+
+        new_ws_xml = re.sub(
+            r"<row\b[^>]*>.*?</row>", _patch_row, orig_ws_xml, flags=re.DOTALL
+        )
+
+        # ── 5. Construir ZIP de salida ────────────────────────────────────────
+        # Idéntico al original, solo se reemplazan sheet5.xml y sharedStrings
+        output_buf = io.BytesIO()
+        with zipfile.ZipFile(output_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
+            for item, data in all_entries:
+                fname = item.filename
+                if fname == sheet_zip_path:
+                    out_zip.writestr(item, new_ws_xml.encode("utf-8"))
+                elif fname == "xl/sharedStrings.xml":
+                    out_zip.writestr(item, new_ss_xml.encode("utf-8"))
+                else:
+                    out_zip.writestr(item, data)
 
         output_buf.seek(0)
         return output_buf.read()
