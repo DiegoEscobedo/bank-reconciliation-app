@@ -253,6 +253,7 @@ class ExcelReporter:
         source: "str | bytes",
         reconciled_aux_facts: list,
         match_date: "date | None" = None,
+        debug_info: "dict | None" = None,
     ) -> bytes:
         """
         Marca como conciliadas en el Papel de Trabajo las filas que
@@ -334,6 +335,9 @@ class ExcelReporter:
                     "No se encontró la hoja 'AUX CONTABLE' en el archivo."
                 )
 
+            if debug_info is not None:
+                debug_info["sheet_zip_path"] = sheet_zip_path
+
             orig_ws_bytes = z.read(sheet_zip_path)
             orig_ss_bytes = z.read("xl/sharedStrings.xml")
             all_entries: list[tuple] = [
@@ -392,6 +396,15 @@ class ExcelReporter:
                         col_fecha_letter = col_ltr
                 break
 
+        if debug_info is not None:
+            debug_info["header_row_idx"] = header_row_idx
+            debug_info["col_aux_letter"] = col_aux_letter
+            debug_info["col_conc_letter"] = col_conc_letter
+            debug_info["col_fecha_letter"] = col_fecha_letter
+            debug_info["ss_count"] = len(ss_values)
+            # Muestra los primeros 5 valores de sharedStrings para verificar
+            debug_info["ss_head"] = ss_values[:5]
+
         if header_row_idx is None or col_aux_letter is None:
             raise ValueError(
                 "No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE."
@@ -412,6 +425,7 @@ class ExcelReporter:
             except (ValueError, OverflowError):
                 pass
         rows_to_mark: list[int] = []
+        _dbg_aux_vals: list = []  # primeros valores de Aux_Fact vistos en XML
 
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
             row_txt = row_m.group()
@@ -449,8 +463,16 @@ class ExcelReporter:
                     except ValueError:
                         aux_val = raw
 
+            if len(_dbg_aux_vals) < 10:
+                _dbg_aux_vals.append({"row": rn, "raw_v": v_m.group(1).strip() if v_m else None, "aux_val": aux_val})
+
             if aux_val in reconciled_set:
                 rows_to_mark.append(rn)
+
+        if debug_info is not None:
+            debug_info["reconciled_set_sample"] = list(reconciled_set)[:10]
+            debug_info["rows_to_mark"] = rows_to_mark[:20]
+            debug_info["xml_aux_vals_sample"] = _dbg_aux_vals
 
         if not rows_to_mark:
             return src_bytes
@@ -481,9 +503,18 @@ class ExcelReporter:
 
         # ── 4. Parchear el worksheet XML directamente ────────────────────────
         # Para cada fila a marcar: eliminar celdas AT / AU existentes e
-        # insertar las nuevas antes de </row>.
+        # insertar las nuevas en la posición correcta (orden de columnas).
         rows_set = set(rows_to_mark)
         date_str = match_date.strftime("%d/%m/%Y")
+
+        def _col2num(col: str) -> int:
+            """Convierte letra(s) de columna Excel a número (A=1, Z=26, AA=27…)."""
+            n = 0
+            for ch in col.upper():
+                n = n * 26 + (ord(ch) - 64)
+            return n
+
+        _fecha_col_num = _col2num(col_fecha_letter) if col_fecha_letter else 47
 
         def _patch_row(m: re.Match) -> str:
             row_txt = m.group(0)
@@ -494,7 +525,7 @@ class ExcelReporter:
             if rn not in rows_set:
                 return row_txt
 
-            # Quitar celdas AT y AU actuales si existen
+            # Quitar celdas AT y AU actuales si existen (auto-close y con contenido)
             if col_conc_letter:
                 row_txt = re.sub(
                     rf'<c\s+r="{col_conc_letter}{rn}"[^/]*/>', "", row_txt
@@ -515,18 +546,28 @@ class ExcelReporter:
             # Construir nuevas celdas
             new_cells = ""
             if col_conc_letter:
-                # Shared string → mismo aspecto que el resto de strings del archivo
                 new_cells += (
                     f'<c r="{col_conc_letter}{rn}" t="s"><v>{si_idx}</v></c>'
                 )
             if col_fecha_letter:
-                # Inline string para la fecha (evita depender de estilos numéricos)
                 new_cells += (
                     f'<c r="{col_fecha_letter}{rn}" t="inlineStr">'
                     f"<is><t>{date_str}</t></is></c>"
                 )
 
-            return row_txt.replace("</row>", new_cells + "</row>")
+            # Insertar en la posición correcta de columna, no al final.
+            # OOXML exige que las celdas de una fila estén en orden ascendente
+            # de columna; si hay celdas AV, AW… después de AU, insertar antes.
+            insert_pos = None
+            for cell_m in re.finditer(rf'<c\s+r="([A-Z]+){rn}"', row_txt):
+                if _col2num(cell_m.group(1)) > _fecha_col_num:
+                    insert_pos = cell_m.start()
+                    break
+
+            if insert_pos is not None:
+                return row_txt[:insert_pos] + new_cells + row_txt[insert_pos:]
+            else:
+                return row_txt.replace("</row>", new_cells + "</row>")
 
         new_ws_xml = re.sub(
             r"<row\b[^>]*>.*?</row>", _patch_row, orig_ws_xml, flags=re.DOTALL

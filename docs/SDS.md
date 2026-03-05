@@ -12,13 +12,13 @@
 
 ## 1. Introducción
 
-Este documento describe la arquitectura, los módulos, el flujo de datos y las decisiones de diseño del Sistema de Conciliación Bancaria. Está dirigido a desarrolladores que necesiten mantener, extender o comprender el sistema a nivel técnico.
+Este documento describe la arquitectura, los módulos, el flujo de datos y las decisiones de diseño del Sistema de Conciliación Bancaria. Está dirigido a desarrolladores que necesiten mantener o comprender el sistema a nivel técnico.
 
 ---
 
 ## 2. Arquitectura General
 
-El sistema sigue una **arquitectura por capas** donde cada capa tiene una única responsabilidad y se comunica solo con la capa adyacente. No existe base de datos; todos los datos fluyen como `pandas.DataFrame` entre módulos.
+El sistema sigue una **arquitectura por capas** cada capa tiene una única responsabilidad y se comunica solo con la capa adyacente. No existe base de datos; todos los datos fluyen como `pandas.DataFrame` entre módulos.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

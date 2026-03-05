@@ -212,7 +212,7 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 ## 4. Requisitos No Funcionales
 
 ### RNF-01 — Rendimiento
-El procesamiento de archivos con hasta 5,000 movimientos combinados (banco + JDE) debe completarse en menos de 30 segundos en hardware estándar de oficina.
+El procesamiento de archivos de hasta 5,000 movimientos combinados (banco + JDE) debe completarse en menos de 30 segundos en hardware estándar de oficina.
 
 ### RNF-02 — Usabilidad
 La interfaz Streamlit debe ser operable sin conocimientos técnicos: carga de archivos por arrastrar, visualización de resultados en tabla y descarga de reportes en un clic.
