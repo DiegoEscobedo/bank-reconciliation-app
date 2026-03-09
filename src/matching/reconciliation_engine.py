@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 
 from config.settings import (
@@ -212,6 +214,60 @@ class ReconciliationEngine:
         return filtered  # filtrado estricto por tienda+tipo
 
     # ============================================================
+    # FILTRADO POR COMISIÓN  (helper compartido)
+    # ============================================================
+
+    # Palabras que identifican un movimiento de comisión en la descripción
+    _COMISION_RE = re.compile(r"comisi[oó]n|comision", re.IGNORECASE)
+
+    @classmethod
+    def _es_comision(cls, description: str) -> bool:
+        return bool(cls._COMISION_RE.search(str(description or "")))
+
+    def _filter_by_comision(
+        self,
+        candidates: "pd.DataFrame",
+        bank_row,
+    ) -> "pd.DataFrame":
+        """
+        Aplica discriminación simétrica por comisión:
+          - Banco ES comisión   → solo candidatos JDE con comisión
+          - Banco NO es comisión → excluye candidatos JDE con comisión
+
+        Si ningún candidato JDE tiene comisión en la descripción el filtro
+        no provoca cambios (backward-compatible).
+        """
+        if "description" not in candidates.columns or candidates.empty:
+            return candidates
+
+        try:
+            bank_desc = str(
+                bank_row.get("description") if hasattr(bank_row, "get")
+                else bank_row["description"]
+            )
+        except (KeyError, TypeError):
+            bank_desc = ""
+
+        bank_comision = self._es_comision(bank_desc)
+        jde_comision_mask = candidates["description"].apply(self._es_comision)
+
+        # Si ningún JDE tiene comisión, el filtro no aporta información
+        if not jde_comision_mask.any():
+            return candidates
+
+        if bank_comision:
+            # Banco es comisión → solo candidatos JDE con comisión
+            filtered = candidates[jde_comision_mask]
+        else:
+            # Banco no es comisión → excluir candidatos JDE con comisión
+            filtered = candidates[~jde_comision_mask]
+
+        # Si el filtro dejó vacío y el banco SI es comisión, devolver vacío
+        # (genuinamente no hay match de comisión).  Si el banco NO es
+        # comisión y al excluirlas queda vacío, idem.
+        return filtered
+
+    # ============================================================
     # MATCHING EXACTO UNO A UNO
     # ============================================================
 
@@ -242,6 +298,10 @@ class ReconciliationEngine:
             # Refinar por tienda+tipo si hay info disponible
             potential_jde_candidates = self._filter_by_tienda(
                 potential_jde_candidates, bank_row, jde_dataframe
+            )
+            # Refinar por comisión (simétrico)
+            potential_jde_candidates = self._filter_by_comision(
+                potential_jde_candidates, bank_row
             )
 
             for jde_index, jde_row in potential_jde_candidates.iterrows():
@@ -329,6 +389,12 @@ class ReconciliationEngine:
             if available_jde.empty:
                 continue
 
+            # Refinar por comisión (simétrico)
+            available_jde = self._filter_by_comision(available_jde, bank_row)
+
+            if available_jde.empty:
+                continue
+
             filtered = available_jde[
                 available_jde["abs_amount"] <= target_amount + self.amount_tolerance
             ].copy()
@@ -398,6 +464,9 @@ class ReconciliationEngine:
                 alt_jde = self._filter_by_tienda(
                     alt_jde, bank_row, jde_dataframe
                 )
+
+                # Refinar por comisión (simétrico)
+                alt_jde = self._filter_by_comision(alt_jde, bank_row)
 
                 alt_filtered = alt_jde[
                     alt_jde["abs_amount"] <= target_amount + self.amount_tolerance
