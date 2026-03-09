@@ -244,42 +244,76 @@ class _ScotiabankParser(_BaseBankParser):
 
 class _NetPayParser(_BaseBankParser):
     """
-    Formato NetPay (Excel):
-        Filas 0-8  → metadatos / vacías
-        Fila 9     → header: col2=Fecha, col3=ClaveRastreo,
-                              col4=CuentaDepósito, col5=Descripción,
-                              col6=MontoDepósito
-        Fila 10..n → datos (hasta fila con col2="Total")
+    Formato NetPay (Excel): encabezados en una fila variable (busca
+    dinámicamente hasta la fila 30). Columnas detectadas por nombre:
+        Fecha de Movimiento / Fecha  → raw_date
+        Clave de Rastreo / Referencia → description
+        Cuenta Destino / Cuenta Depósito → account_id
+        Monto de Trx / Monto TRX / Monto Depósito → raw_deposit
     Todos los movimientos son DEPÓSITOS al banco destino.
-    El account_id se extrae de col4 (ej. "0884166614" → sufijo "6614").
     """
 
     BANK_NAME = "NETPAY"
 
-    _HEADER_ROW   = 9
-    _IDX_DATE     = 2
-    _IDX_ACCOUNT  = 4
-    _IDX_DESC     = 5
-    _IDX_AMOUNT   = 6
+    # Palabras clave para mapear columnas (orden: preferida → fallback)
+    _COL_DATE    = ("FECHA DE MOVIMIENTO", "FECHA MOVIMIENTO", "FECHA")
+    _COL_ACCOUNT = ("CUENTA DESTINO", "CUENTA DEPÓSITO", "CUENTA DEPOSITO", "CUENTA")
+    _COL_DESC    = ("DESCRIPCIÓN", "DESCRIPCION", "CLAVE DE RASTREO", "REFERENCIA")
+    _COL_AMOUNT  = ("MONTO DE TRX", "MONTO DE TRANSACCIÓN", "MONTO TRX", "MONTO TRANSACCION", "MONTO DEPÓSITO", "MONTO DEPOSITO", "MONTO")
 
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
-        # Detectar columna de Monto TRX en la fila de encabezado
-        header_row = raw.iloc[self._HEADER_ROW].fillna("").astype(str)
-        idx_amount = self._IDX_AMOUNT  # fallback: Monto Depósito (col 6)
-        for _i, _val in enumerate(header_row):
-            _v = _val.strip().upper()
-            if "TRX" in _v or ("MONTO" in _v and "TRANSAC" in _v):
-                idx_amount = _i
-                logger.info("[NETPAY] Usando columna %d ('%s') como monto", _i, _val.strip())
+        # ── 1. Detectar fila de encabezado ────────────────────────────
+        header_row_idx = None
+        col_map: dict[str, int] = {}
+
+        for _ri in range(min(30, len(raw))):
+            row_vals = raw.iloc[_ri].fillna("").astype(str)
+            row_upper = [v.strip().upper() for v in row_vals]
+            # Buscar al menos fecha + monto en esta fila
+            has_fecha = any("FECHA" in v for v in row_upper)
+            has_monto = any("MONTO" in v for v in row_upper)
+            if has_fecha and has_monto:
+                header_row_idx = _ri
+                for _ci, _v in enumerate(row_upper):
+                    col_map[_v] = _ci
                 break
 
-        # Filas de datos: desde _HEADER_ROW+1, mientras col _IDX_DATE no sea "Total"
-        data = raw.iloc[self._HEADER_ROW + 1:].copy().reset_index(drop=True)
-        # Filtrar filas de totales/resumen (col _IDX_DATE == "Total" o vacía)
+        if header_row_idx is None:
+            logger.warning("[NETPAY] No se encontró fila de encabezado, usando defaults.")
+            header_row_idx = 9
+            # Fallback a índices fijos legacy
+            col_map = {}
+
+        def _find_col(keywords, default=None):
+            for kw in keywords:
+                if kw in col_map:
+                    return col_map[kw]
+            # Búsqueda parcial
+            for kw in keywords:
+                for k, v in col_map.items():
+                    if kw in k:
+                        return v
+            return default
+
+        idx_date    = _find_col(self._COL_DATE,    default=2)
+        idx_account = _find_col(self._COL_ACCOUNT, default=4)
+        idx_desc    = _find_col(self._COL_DESC,    default=5)
+        idx_amount  = _find_col(self._COL_AMOUNT,  default=6)
+
+        logger.info(
+            "[NETPAY] Header fila=%d | fecha=%d cuenta=%d desc=%d monto=%d",
+            header_row_idx, idx_date, idx_account, idx_desc, idx_amount,
+        )
+
+        # ── 2. Extraer filas de datos ─────────────────────────────────
+        data = raw.iloc[header_row_idx + 1:].copy().reset_index(drop=True)
+        data = data.fillna("").astype(str)
+
+        # Filtrar filas vacías o de totales
         data = data[
-            data.iloc[:, self._IDX_DATE].str.strip().ne("") &
-            data.iloc[:, self._IDX_DATE].str.strip().ne("Total") &
-            data.iloc[:, self._IDX_AMOUNT].str.strip().ne("")
+            data.iloc[:, idx_date].str.strip().ne("") &
+            data.iloc[:, idx_date].str.strip().str.upper().ne("TOTAL") &
+            data.iloc[:, idx_amount].str.strip().ne("")
         ].copy().reset_index(drop=True)
 
         if data.empty:
@@ -287,17 +321,17 @@ class _NetPayParser(_BaseBankParser):
                                          "description", "description_detail",
                                          "raw_deposit", "raw_withdrawal"])
 
-        # account_id desde primera fila de col _IDX_ACCOUNT
-        account_id = str(data.iloc[0, self._IDX_ACCOUNT]).strip()
+        # account_id desde primera fila válida
+        account_id = str(data.iloc[0, idx_account]).strip()
         logger.info("[NETPAY] Cuenta destino: %s", account_id)
 
         result = pd.DataFrame({
             "account_id":         account_id,
             "bank":               self.BANK_NAME,
-            "raw_date":           data.iloc[:, self._IDX_DATE].astype(str).str.strip(),
-            "description":        data.iloc[:, self._IDX_DESC].astype(str).str.strip(),
+            "raw_date":           data.iloc[:, idx_date].str.strip(),
+            "description":        data.iloc[:, idx_desc].str.strip(),
             "description_detail": "",
-            "raw_deposit":        data.iloc[:, idx_amount].astype(str).str.strip(),
+            "raw_deposit":        data.iloc[:, idx_amount].str.strip(),
             "raw_withdrawal":     "",
         })
         return result.reset_index(drop=True)
@@ -694,11 +728,13 @@ class BankParser:
         if len(raw.columns) > 7 and str(raw.iloc[0, 7]).strip() in ("Cargo", "Abono"):
             return _ScotiabankParser
 
-        # NETPAY: fila 9 col 2 = "Fecha de Movimiento" y col 6 = "Monto Depósito"
-        if len(raw) > 9:
-            row9 = raw.iloc[9].fillna("").astype(str)
-            if "Fecha de Movimiento" in row9.values and "Monto" in " ".join(row9.values):
-                return _NetPayParser
+        # NETPAY: busca en las primeras 30 filas alguna que contenga
+        # "Monto de Trx" / "Monto TRX" o "Fecha de Movimiento" + "Monto"
+        _np_text = " ".join(
+            raw.iloc[:min(30, len(raw))].fillna("").astype(str).values.flatten()
+        ).upper()
+        if "MONTO DE TRX" in _np_text or "MONTO TRX" in _np_text or "FECHA DE MOVIMIENTO" in _np_text:
+            return _NetPayParser
 
         # MERCADO PAGO: fila 0 contiene "Ventas" o fila 3 col 0 = "Número de operación"
         row0_text = " ".join(raw.iloc[0].fillna("").astype(str).tolist()).upper()
