@@ -336,10 +336,7 @@ class ReconciliationEngine:
             if filtered.empty:
                 continue
 
-            candidate_rows = list(filtered.nsmallest(25, "abs_amount").iterrows())
-            subset_result  = self._find_subset_sum_with_limit(
-                candidate_rows, target_amount
-            )
+            subset_result = self._try_subsets_per_tienda(filtered, target_amount)
 
             if not subset_result:
                 continue
@@ -409,11 +406,8 @@ class ReconciliationEngine:
                 if alt_filtered.empty:
                     continue
 
-                alt_candidates = list(
-                    alt_filtered.nsmallest(25, "abs_amount").iterrows()
-                )
-                alt_result = self._find_subset_sum_with_limit(
-                    alt_candidates, target_amount
+                alt_result = self._try_subsets_per_tienda(
+                    alt_filtered, target_amount
                 )
 
                 if not alt_result:
@@ -440,6 +434,79 @@ class ReconciliationEngine:
                 group_id += 1
 
         return final_proposals
+
+    # ============================================================
+    # SUBSET SUM POR TIENDA — garantiza homogeneidad en grupos
+    # ============================================================
+
+    def _try_subsets_per_tienda(
+        self,
+        filtered_candidates: "pd.DataFrame",
+        target_amount: float,
+    ) -> "list | None":
+        """
+        Intenta encontrar el mejor subset sum garantizando que todos los
+        registros JDE del grupo pertenezcan a la MISMA tienda.
+
+        Si los candidatos no tienen columna ``tienda`` o todos son de la
+        misma tienda, se comporta igual que ``_find_subset_sum_with_limit``
+        directamente.  Si hay varias tiendas, prueba cada una por separado
+        y devuelve el resultado con menor diferencia de monto absoluta.
+        """
+        has_tienda = (
+            "tienda" in filtered_candidates.columns
+            and filtered_candidates["tienda"].notna().any()
+            and (filtered_candidates["tienda"].str.strip() != "").any()
+        )
+
+        if not has_tienda:
+            # Sin info de tienda → comportamiento original
+            candidate_rows = list(
+                filtered_candidates.nsmallest(25, "abs_amount").iterrows()
+            )
+            return self._find_subset_sum_with_limit(candidate_rows, target_amount)
+
+        # Obtener tiendas únicas presentes en los candidatos
+        tiendas = (
+            filtered_candidates["tienda"]
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .unique()
+        )
+
+        if len(tiendas) <= 1:
+            # Una sola tienda → sin riesgo de mezcla, camino directo
+            candidate_rows = list(
+                filtered_candidates.nsmallest(25, "abs_amount").iterrows()
+            )
+            return self._find_subset_sum_with_limit(candidate_rows, target_amount)
+
+        # Múltiples tiendas → probar cada una y conservar el mejor resultado
+        best_result = None
+        best_diff   = float("inf")
+
+        for tienda in tiendas:
+            grupo = filtered_candidates[
+                filtered_candidates["tienda"].str.strip() == tienda
+            ]
+            candidate_rows = list(grupo.nsmallest(25, "abs_amount").iterrows())
+            result = self._find_subset_sum_with_limit(candidate_rows, target_amount)
+            if result is None:
+                continue
+            accumulated = round(
+                sum(
+                    round(r["abs_amount"], self.rounding_decimals)
+                    for _, r in result
+                ),
+                self.rounding_decimals,
+            )
+            diff = abs(target_amount - accumulated)
+            if diff < best_diff:
+                best_diff   = diff
+                best_result = result
+
+        return best_result
 
     # ============================================================
     # SUBSET SUM CON BACKTRACKING Y PODA
