@@ -104,6 +104,7 @@ class ExcelReporter:
             return {
                 "Fecha Banco":       bank_row.get("movement_date"),
                 "Cuenta Banco":      bank_row.get("account_id", ""),
+                "Fuente":            bank_row.get("bank", "") or "",
                 "Tienda":            bank_row.get("tienda", "") or "",
                 "Tipo Pago":         bank_row.get("tipo_banco", "") or "",
                 "Descripción Banco": bank_row.get("description", ""),
@@ -143,7 +144,7 @@ class ExcelReporter:
 
         cols = [
             "Tipo Match",
-            "Fecha Banco", "Cuenta Banco", "Tienda", "Tipo Pago", "Descripción Banco", "Monto Banco",
+            "Fecha Banco", "Cuenta Banco", "Fuente", "Tienda", "Tipo Pago", "Descripción Banco", "Monto Banco",
             "Fecha JDE",   "Cuenta JDE",   "Doc Tipo", "Documento JDE", "Tienda JDE", "Tipo JDE", "Descripción JDE", "Monto JDE",
             "Diferencia",
         ]
@@ -162,7 +163,7 @@ class ExcelReporter:
 
         if df.empty:
             base_cols = ["Cuenta", "Fecha", "Tienda", "Tipo", "Doc Tipo", "Documento", "Descripción", "Monto", "Origen"] if is_jde \
-                   else ["Cuenta", "Fecha", "Tienda", "Tipo Pago", "Descripción", "Monto", "Origen"]
+                   else ["Cuenta", "Fecha", "Fuente", "Tienda", "Tipo Pago", "Descripción", "Monto", "Origen"]
             out = pd.DataFrame(columns=base_cols)
         else:
             out = pd.DataFrame()
@@ -179,6 +180,7 @@ class ExcelReporter:
                 out["Doc Tipo"]   = df.get("doc_type",  pd.Series("", index=df.index)).fillna("")
                 out["Documento"]  = df.get("document",  pd.Series("", index=df.index)).fillna("")
             else:
+                out["Fuente"]     = df["bank"].fillna("") if "bank" in df.columns else ""
                 out["Tipo Pago"]  = df.get("tipo_banco", pd.Series("", index=df.index)).fillna("")
 
             out["Descripción"] = df["description"]

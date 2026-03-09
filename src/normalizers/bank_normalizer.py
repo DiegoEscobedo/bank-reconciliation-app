@@ -93,6 +93,11 @@ class BankNormalizer:
                 df[extra] = df[extra].fillna("").astype(str).str.strip()
                 base_cols.append(extra)
 
+        # Preservar nombre del banco (NETPAY, BBVA, MERCADOPAGO…)
+        if "bank" in df.columns:
+            df["bank"] = df["bank"].fillna("").astype(str).str.strip()
+            base_cols.append("bank")
+
         result = df[base_cols].reset_index(drop=True)
 
         logger.info("[BANK] Movimientos normalizados: %d", len(result))

@@ -263,6 +263,16 @@ class _NetPayParser(_BaseBankParser):
     _IDX_AMOUNT   = 6
 
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
+        # Detectar columna de Monto TRX en la fila de encabezado
+        header_row = raw.iloc[self._HEADER_ROW].fillna("").astype(str)
+        idx_amount = self._IDX_AMOUNT  # fallback: Monto Depósito (col 6)
+        for _i, _val in enumerate(header_row):
+            _v = _val.strip().upper()
+            if "TRX" in _v or ("MONTO" in _v and "TRANSAC" in _v):
+                idx_amount = _i
+                logger.info("[NETPAY] Usando columna %d ('%s') como monto", _i, _val.strip())
+                break
+
         # Filas de datos: desde _HEADER_ROW+1, mientras col _IDX_DATE no sea "Total"
         data = raw.iloc[self._HEADER_ROW + 1:].copy().reset_index(drop=True)
         # Filtrar filas de totales/resumen (col _IDX_DATE == "Total" o vacía)
@@ -287,7 +297,7 @@ class _NetPayParser(_BaseBankParser):
             "raw_date":           data.iloc[:, self._IDX_DATE].astype(str).str.strip(),
             "description":        data.iloc[:, self._IDX_DESC].astype(str).str.strip(),
             "description_detail": "",
-            "raw_deposit":        data.iloc[:, self._IDX_AMOUNT].astype(str).str.strip(),
+            "raw_deposit":        data.iloc[:, idx_amount].astype(str).str.strip(),
             "raw_withdrawal":     "",
         })
         return result.reset_index(drop=True)
@@ -595,16 +605,25 @@ class BankParser:
             try:
                 xl = pd.ExcelFile(file_path)
 
-                # REPORTE CAJA: detectar por nombre de archivo o por contenido
-                # (presencia de columnas FECHA+TIENDA+BANCO en las primeras filas)
-                if "Hoja2" not in xl.sheet_names:
-                    hoja1 = pd.read_excel(
-                        file_path, sheet_name=0,
-                        header=None, dtype=str
-                    ).fillna("")
+                # REPORTE CAJA: intentar primero por nombre de archivo,
+                # luego por contenido (independientemente de las hojas presentes).
+                _fname_upper = str(file_path).upper()
+                _force_reporte_caja = (
+                    "REPORTE CAJA" in _fname_upper
+                    or "REPORTE_CAJA" in _fname_upper
+                )
+
+                hoja1 = pd.read_excel(
+                    file_path, sheet_name=0,
+                    header=None, dtype=str
+                ).fillna("")
+
+                _is_reporte_caja = False
+                if _force_reporte_caja:
+                    _is_reporte_caja = True
+                else:
                     # Detectar si alguna de las primeras 5 filas tiene cabeceras de caja
                     _keywords = {"FECHA", "TIENDA", "BANCO", "MONTO"}
-                    _is_reporte_caja = False
                     for _i in range(min(5, len(hoja1))):
                         _row_vals = {str(v).strip().upper() for v in hoja1.iloc[_i].values}
                         if len(_row_vals & _keywords) >= 3:
@@ -613,11 +632,12 @@ class BankParser:
                     # También detectar por A1 == "TIENDAS" (formato anterior)
                     if not _is_reporte_caja and len(hoja1) > 0:
                         _is_reporte_caja = str(hoja1.iloc[0, 0]).strip().upper() == "TIENDAS"
-                    if _is_reporte_caja:
-                        logger.info("Formato bancario detectado: REPORTE_CAJA")
-                        result = _ReporteCajaParser().parse_raw(hoja1)
-                        logger.info("[REPORTE_CAJA] Filas parseadas: %d", len(result))
-                        return result
+
+                if _is_reporte_caja:
+                    logger.info("Formato bancario detectado: REPORTE_CAJA")
+                    result = _ReporteCajaParser().parse_raw(hoja1)
+                    logger.info("[REPORTE_CAJA] Filas parseadas: %d", len(result))
+                    return result
 
                 # REPORTE (banco enriquecido con Hoja2 + columna TPV)
                 if "Hoja2" in xl.sheet_names:
