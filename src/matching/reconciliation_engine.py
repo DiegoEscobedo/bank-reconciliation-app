@@ -56,6 +56,7 @@ class ReconciliationEngine:
             jde_movements_dataframe,
         )
         all_ids = {p["group_id"] for p in interactive["proposed_grouped_matches"]}
+        all_ids |= {p["group_id"] for p in interactive.get("proposed_reverse_grouped_matches", [])}
         return self.confirm_grouped_matches(interactive, all_ids)
 
     # ============================================================
@@ -80,11 +81,18 @@ class ReconciliationEngine:
         exact_matches   = self._perform_exact_matching(bank_df, jde_df)
         proposed_groups = self._propose_grouped_matches(bank_df, jde_df)
 
+        # IDs ya usados por propuestas forward para evitar colisión
+        next_id = max((p["group_id"] for p in proposed_groups), default=-1) + 1
+        proposed_reverse = self._propose_reverse_grouped_matches(
+            bank_df, jde_df, proposed_groups, start_group_id=next_id
+        )
+
         return {
-            "_bank_df_full":           bank_df,
-            "_jde_df_full":            jde_df,
-            "exact_matches":           exact_matches,
-            "proposed_grouped_matches": proposed_groups,
+            "_bank_df_full":                    bank_df,
+            "_jde_df_full":                     jde_df,
+            "exact_matches":                    exact_matches,
+            "proposed_grouped_matches":         proposed_groups,
+            "proposed_reverse_grouped_matches": proposed_reverse,
         }
 
     def confirm_grouped_matches(self, interactive_result, approved_group_ids):
@@ -113,31 +121,56 @@ class ReconciliationEngine:
                 "amount_difference": proposal["amount_difference"],
             })
 
+        # ── Agrupaciones inversas (N banco → 1 JDE) ─────────────────────
+        confirmed_reverse: list = []
+        for proposal in interactive_result.get("proposed_reverse_grouped_matches", []):
+            if proposal["group_id"] not in approved_group_ids:
+                continue
+            # Verificar que ninguna fila ya fue tomada por otra agrupación
+            if jde_df.at[proposal["jde_row_index"], "is_matched"]:
+                continue
+            if any(bank_df.at[bi, "is_matched"] for bi in proposal["bank_row_indices"]):
+                continue
+
+            jde_df.at[proposal["jde_row_index"], "is_matched"] = True
+            for bi in proposal["bank_row_indices"]:
+                bank_df.at[bi, "is_matched"] = True
+
+            confirmed_reverse.append({
+                "match_type":        "reverse_grouped",
+                "jde_row_index":     proposal["jde_row_index"],
+                "bank_row_indices":  proposal["bank_row_indices"],
+                "amount_difference": proposal["amount_difference"],
+            })
+
         conciliated_bank = bank_df[bank_df["is_matched"]].copy()
         conciliated_jde  = jde_df[jde_df["is_matched"]].copy()
         pending_bank     = bank_df[~bank_df["is_matched"]].copy()
         pending_jde      = jde_df[~jde_df["is_matched"]].copy()
 
         summary = {
-            "total_bank_movements":  len(bank_df),
-            "total_jde_movements":   len(jde_df),
-            "exact_matches_count":   len(interactive_result["exact_matches"]),
-            "grouped_matches_count": len(confirmed_grouped),
-            "pending_bank_count":    len(pending_bank),
-            "pending_jde_count":     len(pending_jde),
+            "total_bank_movements":          len(bank_df),
+            "total_jde_movements":           len(jde_df),
+            "exact_matches_count":           len(interactive_result["exact_matches"]),
+            "grouped_matches_count":         len(confirmed_grouped),
+            "reverse_grouped_matches_count": len(confirmed_reverse),
+            "pending_bank_count":            len(pending_bank),
+            "pending_jde_count":             len(pending_jde),
         }
 
         return {
-            "conciliated_bank_movements": conciliated_bank,
-            "conciliated_jde_movements":  conciliated_jde,
-            "pending_bank_movements":     pending_bank,
-            "pending_jde_movements":      pending_jde,
-            "exact_matches":              interactive_result["exact_matches"],
-            "grouped_matches":            confirmed_grouped,
-            "proposed_grouped_matches":   interactive_result["proposed_grouped_matches"],
-            "summary":                    summary,
-            "_bank_df_full":              bank_df,
-            "_jde_df_full":               jde_df,
+            "conciliated_bank_movements":       conciliated_bank,
+            "conciliated_jde_movements":        conciliated_jde,
+            "pending_bank_movements":           pending_bank,
+            "pending_jde_movements":            pending_jde,
+            "exact_matches":                    interactive_result["exact_matches"],
+            "grouped_matches":                  confirmed_grouped,
+            "reverse_grouped_matches":          confirmed_reverse,
+            "proposed_grouped_matches":         interactive_result["proposed_grouped_matches"],
+            "proposed_reverse_grouped_matches": interactive_result.get("proposed_reverse_grouped_matches", []),
+            "summary":                          summary,
+            "_bank_df_full":                    bank_df,
+            "_jde_df_full":                     jde_df,
             # Pass-through metadata de la fuente JDE
             "_jde_source_path":           interactive_result.get("_jde_source_path"),
             "_jde_bytes":                 interactive_result.get("_jde_bytes"),
@@ -162,13 +195,22 @@ class ReconciliationEngine:
         """
         # Verificar que exista info de tienda en ambos lados
         bank_tienda = ""
-        if hasattr(bank_row, "get"):
-            bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
-        else:
-            try:
-                bank_tienda = str(bank_row["tienda"]).strip().upper()
-            except (KeyError, TypeError):
-                pass
+        try:
+            _raw = bank_row.get("tienda") if hasattr(bank_row, "get") else bank_row["tienda"]
+            # pd.isna cubre float('nan'), None, pd.NA, pd.NaT
+            if not pd.isna(_raw) and str(_raw).strip().upper() not in ("", "NAN", "NONE", "NA", "<NA>"):
+                bank_tienda = str(_raw).strip().upper()
+        except (KeyError, TypeError):
+            pass
+
+        # NETPAY: el matching por tienda no aplica — el filtro de monto+fecha
+        # es suficiente para evitar falsos positivos. La tienda solo es informativa.
+        try:
+            _bank_src = bank_row.get("bank") if hasattr(bank_row, "get") else bank_row["bank"]
+            if str(_bank_src).strip().upper() == "NETPAY":
+                return candidates
+        except (KeyError, TypeError):
+            pass
 
         # Determinar si la columna tienda existe en los candidatos JDE
         jde_tiene_tienda = (
@@ -294,6 +336,14 @@ class ReconciliationEngine:
                     jde_dataframe["movement_date"]
                 ))
             ]
+
+            if potential_jde_candidates.empty:
+                logger.warning(
+                    "[EXACT] Banco idx=%d  amt=%.2f  fecha=%s → 0 candidatos JDE por fecha (tolerancia=%d días)",
+                    bank_index, bank_amount,
+                    str(bank_date)[:10] if pd.notna(bank_date) else "NaT",
+                    self.date_tolerance_days,
+                )
 
             # Refinar por tienda+tipo si hay info disponible
             potential_jde_candidates = self._filter_by_tienda(
@@ -576,6 +626,88 @@ class ReconciliationEngine:
                 best_result = result
 
         return best_result
+
+    # ============================================================
+    # AGRUPACIÓN INVERSA — N banco → 1 JDE
+    # ============================================================
+
+    def _propose_reverse_grouped_matches(
+        self,
+        bank_dataframe: "pd.DataFrame",
+        jde_dataframe: "pd.DataFrame",
+        forward_proposals: list,
+        start_group_id: int = 10000,
+    ) -> list:
+        """
+        Para cada movimiento JDE pendiente, busca un subconjunto de
+        movimientos bancarios pendientes cuya SUMA iguale el monto JDE
+        (dentro de la tolerancia). Solo aplica cuando se necesitan 2+
+        movimientos bancarios (si fuera 1, el matching exacto ya lo cubriría).
+
+        Caso típico: varias comisiones bancarias separadas (−10, −5, −1.60, −0.80)
+        que juntas suman la comisión registrada en JDE (−17.40).
+        """
+        # Bank rows reclamados por propuestas forward (para evitar doble uso)
+        claimed_bank = {p["bank_row_index"] for p in forward_proposals}
+
+        proposals: list = []
+        group_id = start_group_id
+
+        for jde_index, jde_row in jde_dataframe.iterrows():
+            if jde_row["is_matched"]:
+                continue
+
+            target_amount = round(jde_row["abs_amount"], self.rounding_decimals)
+            jde_date      = jde_row["movement_date"]
+            jde_mvtype    = jde_row.get("movement_type", "")
+
+            # Candidatos bancarios: pendientes, mismo tipo, dentro de fecha,
+            # cada uno menor que el total JDE (si fuera igual, exacto ya matcheó)
+            available_bank = bank_dataframe[
+                (~bank_dataframe["is_matched"])
+                & (~bank_dataframe.index.isin(claimed_bank))
+                & (self._is_date_within_tolerance(jde_date, bank_dataframe["movement_date"]))
+                & (bank_dataframe["movement_type"] == jde_mvtype)
+                & (bank_dataframe["abs_amount"] < target_amount - self.amount_tolerance)
+            ].copy()
+
+            if len(available_bank) < 2:
+                continue
+
+            candidate_rows = list(
+                available_bank.nsmallest(25, "abs_amount").iterrows()
+            )
+            result = self._find_subset_sum_with_limit(candidate_rows, target_amount)
+
+            if result is None or len(result) < 2:
+                continue
+
+            bank_indices = [idx for idx, _ in result]
+            accumulated  = round(
+                sum(round(r["abs_amount"], self.rounding_decimals) for _, r in result),
+                self.rounding_decimals,
+            )
+            diff = round(target_amount - accumulated, self.rounding_decimals)
+
+            # Marcar como reclamados para evitar solapamientos dentro de esta fase
+            claimed_bank.update(bank_indices)
+
+            proposals.append({
+                "group_id":          group_id,
+                "jde_row_index":     jde_index,
+                "jde_snapshot":      jde_row.to_dict(),
+                "bank_row_indices":  bank_indices,
+                "bank_snapshots":    [r.to_dict() for _, r in result],
+                "amount_difference": diff,
+                "bank_count":        len(bank_indices),
+            })
+            group_id += 1
+            logger.info(
+                "[REV-GROUPED] JDE idx=%d  amt=%.2f → %d filas banco  diff=%.2f",
+                jde_index, target_amount, len(bank_indices), diff,
+            )
+
+        return proposals
 
     # ============================================================
     # SUBSET SUM CON BACKTRACKING Y PODA

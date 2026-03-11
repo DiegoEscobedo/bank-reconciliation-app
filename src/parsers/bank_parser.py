@@ -256,9 +256,11 @@ class _NetPayParser(_BaseBankParser):
     BANK_NAME = "NETPAY"
 
     # Palabras clave para mapear columnas (orden: preferida → fallback)
-    _COL_DATE    = ("FECHA DE MOVIMIENTO", "FECHA MOVIMIENTO", "FECHA")
+    # Usamos FECHA TRX porque el JDE registra la fecha de la transacción,
+    # no la fecha de depósito.
+    _COL_DATE    = ("FECHA TRX", "FECHA DE MOVIMIENTO", "FECHA MOVIMIENTO", "FECHA DE DEPÓSITO", "FECHA DE DEPOSITO", "FECHA")
     _COL_ACCOUNT = ("CUENTA DESTINO", "CUENTA DEPÓSITO", "CUENTA DEPOSITO", "CUENTA")
-    _COL_DESC    = ("DESCRIPCIÓN", "DESCRIPCION", "CLAVE DE RASTREO", "REFERENCIA")
+    _COL_DESC    = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION", "CLAVE RASTREO", "CLAVE DE RASTREO", "REFERENCIA")
     _COL_AMOUNT  = ("MONTO DE TRX", "MONTO DE TRANSACCIÓN", "MONTO TRX", "MONTO TRANSACCION", "MONTO DEPÓSITO", "MONTO DEPOSITO", "MONTO")
 
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
@@ -334,7 +336,22 @@ class _NetPayParser(_BaseBankParser):
             "raw_deposit":        data.iloc[:, idx_amount].str.strip(),
             "raw_withdrawal":     "",
         })
-        return result.reset_index(drop=True)
+        result = result.reset_index(drop=True)
+        # Mapear Sucursal → tienda (abreviatura JDE) usando TIENDA_ABBREV
+        result["tienda"] = (
+            data.iloc[:, idx_desc].str.strip().str.upper()
+            .map(_TIENDA_ABBREV)
+            .fillna("")
+        )
+        # Diagnóstico: mostrar primeras filas extraídas
+        for _ri in range(min(3, len(result))):
+            logger.info(
+                "[NETPAY] Fila %d: raw_date=%r  raw_deposit=%r  desc=%r",
+                _ri, result.at[_ri, "raw_date"],
+                result.at[_ri, "raw_deposit"],
+                result.at[_ri, "description"],
+            )
+        return result
 
 
 # ════════════════════════════════════════════════════════════
@@ -346,12 +363,12 @@ class _MercadoPagoParser(_BaseBankParser):
     Formato Mercado Pago (Excel):
         Fila 3  → header con 38 columnas
         Fila 4+ → datos
-    Columnas usadas:
-        col0  → Número de operación
-        col1  → Fecha de la compra  ('18 feb 19:14 hs')
-        col2  → Estado              (filtrar solo 'Aprobado')
-        col8  → Total a recibir     (neto después de comisiones)
-        col34 → Sucursal            (descripción)
+    Columnas usadas (buscadas por nombre en la fila de cabecera):
+        'Número de operación'  → folio
+        'Fecha de la compra'   → fecha  ('18 feb 19:14 hs')
+        'Estado'               → filtro (solo 'Aprobado')
+        'Cobro'                → monto bruto cobrado al comprador
+        Sucursal/descripción   → última columna no-vacía o col34
     Todos son DEPÓSITOS. account_id = "7133" (Scotiabank destino).
     """
 
@@ -359,18 +376,51 @@ class _MercadoPagoParser(_BaseBankParser):
     _DESTINATION_ACT = "7133"   # Scotiabank donde deposita MP
 
     _HEADER_ROW  = 3
-    _IDX_FOLIO   = 0
-    _IDX_DATE    = 1
-    _IDX_STATUS  = 2
-    _IDX_AMOUNT  = 8
-    _IDX_SUCURSAL = 34
+
+    # Nombres de columna a buscar (en orden de prioridad, case-insensitive)
+    _COL_FOLIO    = ("NÚMERO DE OPERACIÓN", "NUMERO DE OPERACION", "OPERACION", "FOLIO")
+    _COL_DATE     = ("FECHA DE LA COMPRA",  "FECHA DE OPERACIÓN",  "FECHA DE OPERACION", "FECHA")
+    _COL_STATUS   = ("ESTADO",)
+    _COL_AMOUNT   = ("COBRO",)                          # monto bruto ← corregido
+    _COL_SUCURSAL = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION")
+
+    # Índices de respaldo si los encabezados no coinciden
+    _FALLBACK_IDX_FOLIO    = 0
+    _FALLBACK_IDX_DATE     = 1
+    _FALLBACK_IDX_STATUS   = 2
+    _FALLBACK_IDX_AMOUNT   = 4   # col4 = Cobro en el formato estándar de MP
+    _FALLBACK_IDX_SUCURSAL = 34
+
+    def _resolve_col(self, headers: list[str], names: tuple, fallback: int) -> int:
+        """Devuelve el índice de la primera columna cuyo nombre (normalizado) coincida."""
+        normalized = [h.strip().upper() for h in headers]
+        for name in names:
+            try:
+                return normalized.index(name.upper())
+            except ValueError:
+                continue
+        return fallback
 
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
+        # Leer cabeceras de la fila _HEADER_ROW para resolver índices por nombre
+        header_row = raw.iloc[self._HEADER_ROW].astype(str).tolist()
+
+        idx_folio    = self._resolve_col(header_row, self._COL_FOLIO,    self._FALLBACK_IDX_FOLIO)
+        idx_date     = self._resolve_col(header_row, self._COL_DATE,     self._FALLBACK_IDX_DATE)
+        idx_status   = self._resolve_col(header_row, self._COL_STATUS,   self._FALLBACK_IDX_STATUS)
+        idx_amount   = self._resolve_col(header_row, self._COL_AMOUNT,   self._FALLBACK_IDX_AMOUNT)
+        idx_sucursal = self._resolve_col(header_row, self._COL_SUCURSAL, self._FALLBACK_IDX_SUCURSAL)
+
+        logger.info(
+            "[MERCADOPAGO] Columnas resueltas → folio=%d  fecha=%d  estado=%d  cobro=%d  sucursal=%d",
+            idx_folio, idx_date, idx_status, idx_amount, idx_sucursal,
+        )
+
         data = raw.iloc[self._HEADER_ROW + 1:].copy().reset_index(drop=True)
 
         # Filtrar solo aprobados con monto válido
-        status  = data.iloc[:, self._IDX_STATUS].astype(str).str.strip()
-        amounts = data.iloc[:, self._IDX_AMOUNT].astype(str).str.strip()
+        status  = data.iloc[:, idx_status].astype(str).str.strip()
+        amounts = data.iloc[:, idx_amount].astype(str).str.strip()
         data = data[
             status.str.lower().eq("aprobado") &
             amounts.ne("") & amounts.ne("nan") & amounts.ne("0")
@@ -384,14 +434,14 @@ class _MercadoPagoParser(_BaseBankParser):
         logger.info("[MERCADOPAGO] Cuenta destino: %s", self._DESTINATION_ACT)
 
         # Las fechas vienen como '18 feb 19:14 hs' → convertir a DD/MM/YYYY
-        dates_raw = data.iloc[:, self._IDX_DATE].astype(str).str.strip()
+        dates_raw = data.iloc[:, idx_date].astype(str).str.strip()
         dates_fmt = dates_raw.apply(
             lambda v: parse_date_spanish(v).strftime("%d/%m/%Y")
             if parse_date_spanish(v) is not pd.NaT else v
         )
 
-        folio     = data.iloc[:, self._IDX_FOLIO].astype(str).str.strip()
-        sucursales = data.iloc[:, self._IDX_SUCURSAL].astype(str).str.strip().replace("nan", "")
+        folio      = data.iloc[:, idx_folio].astype(str).str.strip()
+        sucursales = data.iloc[:, idx_sucursal].astype(str).str.strip().replace("nan", "")
 
         result = pd.DataFrame({
             "account_id":         self._DESTINATION_ACT,
@@ -399,7 +449,7 @@ class _MercadoPagoParser(_BaseBankParser):
             "raw_date":           dates_fmt,
             "description":        "MERCADO PAGO | " + sucursales,
             "description_detail": folio,
-            "raw_deposit":        data.iloc[:, self._IDX_AMOUNT].astype(str).str.strip(),
+            "raw_deposit":        data.iloc[:, idx_amount].astype(str).str.strip(),
             "raw_withdrawal":     "",
         })
         return result.reset_index(drop=True)
@@ -685,6 +735,18 @@ class BankParser:
                             result = _ReporteParser().parse_raw(hoja2)
                             logger.info("[REPORTE] Filas parseadas: %d", len(result))
                             return result
+
+                # NETPAY: archivo con hoja 'Ventas Tarjeta Presente'
+                if "Ventas Tarjeta Presente" in xl.sheet_names:
+                    logger.info("Formato bancario detectado: NETPAY")
+                    netpay_raw = pd.read_excel(
+                        file_path, sheet_name="Ventas Tarjeta Presente",
+                        header=None, dtype=str
+                    ).fillna("")
+                    result = _NetPayParser().parse_raw(netpay_raw)
+                    logger.info("[NETPAY] Filas parseadas: %d", len(result))
+                    return result
+
             except Exception:
                 pass  # no es REPORTE, continuar con detección normal
 

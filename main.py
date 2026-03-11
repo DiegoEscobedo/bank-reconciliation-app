@@ -141,23 +141,26 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     jde_df = JDENormalizer().normalize(jde_raw_df)
 
     # Filtrar JDE por cuenta bancaria
-    bank_accounts = set(bank_df["account_id"].unique())
-    jde_filtered  = jde_df[jde_df["account_id"].isin(bank_accounts)].copy()
+    # Siempre intentar match exacto + sufijo para todas las cuentas bancarias,
+    # ya que algunos bancos (ej. NetPay) reportan cuenta larga "0884166614"
+    # mientras JDE usa solo los últimos 4 dígitos "6614".
+    bank_accounts   = set(bank_df["account_id"].unique())
+    jde_account_ids = jde_df["account_id"].unique()
+    matched_jde_ids: set = set()
 
-    if jde_filtered.empty:
-        jde_account_ids  = jde_df["account_id"].unique()
-        matched_jde_ids: set = set()
-        for bank_acct in bank_accounts:
-            for jde_acct in jde_account_ids:
-                if bank_acct.endswith(jde_acct) or jde_acct.endswith(bank_acct):
-                    matched_jde_ids.add(jde_acct)
+    for bank_acct in bank_accounts:
+        for jde_acct in jde_account_ids:
+            if bank_acct == jde_acct or bank_acct.endswith(jde_acct) or jde_acct.endswith(bank_acct):
+                matched_jde_ids.add(jde_acct)
 
-        if matched_jde_ids:
-            jde_filtered = jde_df[jde_df["account_id"].isin(matched_jde_ids)].copy()
-            logger.info(
-                "Match por sufijo: cuenta bancaria %s -> JDE %s (%d movimientos)",
-                bank_accounts, matched_jde_ids, len(jde_filtered),
-            )
+    if matched_jde_ids:
+        jde_filtered = jde_df[jde_df["account_id"].isin(matched_jde_ids)].copy()
+        logger.info(
+            "JDE filtrado por cuenta(s) bancaria(s) %s → JDE id(s) %s (%d movimientos)",
+            bank_accounts, matched_jde_ids, len(jde_filtered),
+        )
+    else:
+        jde_filtered = _pd.DataFrame(columns=jde_df.columns)
 
     if jde_filtered.empty:
         logger.warning(

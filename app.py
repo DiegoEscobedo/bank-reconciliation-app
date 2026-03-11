@@ -175,8 +175,8 @@ if run_btn:
 
             st.session_state["stage1_data"] = stage1_data
 
-            # Si no hay agrupaciones propuestas, finalizar directamente
-            if not stage1_data["proposed_grouped_matches"]:
+            # Si no hay agrupaciones propuestas (forward ni reverse), finalizar directamente
+            if not stage1_data["proposed_grouped_matches"] and not stage1_data.get("proposed_reverse_grouped_matches"):
                 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp2:
                     out2 = Path(tmp2) / "output"
                     out2.mkdir()
@@ -212,13 +212,16 @@ if st.session_state.get("error"):
 # ════════════════════════════════════════════════════════════
 
 if st.session_state.get("phase") == "validating":
-    stage1_data = st.session_state["stage1_data"]
-    proposals   = stage1_data["proposed_grouped_matches"]
-    exact_count = len(stage1_data["exact_matches"])
+    stage1_data      = st.session_state["stage1_data"]
+    proposals        = stage1_data["proposed_grouped_matches"]
+    rev_proposals    = stage1_data.get("proposed_reverse_grouped_matches", [])
+    all_proposals    = proposals + rev_proposals
+    exact_count      = len(stage1_data["exact_matches"])
 
     st.title("Validación de Agrupaciones")
     st.info(
-        f"Se encontraron **{len(proposals)}** agrupaciones propuestas "
+        f"Se encontraron **{len(proposals)}** agrupaciones (1 banco → N JDE) "
+        f"y **{len(rev_proposals)}** agrupaciones inversas (N banco → 1 JDE) "
         f"(además de **{exact_count}** matches exactos ya confirmados).\n\n"
         "Revisa cada agrupación y acepta o rechaza antes de finalizar. "
         "Pueden existir registros **atrasados de meses anteriores** — "
@@ -228,12 +231,12 @@ if st.session_state.get("phase") == "validating":
     col_all, col_none, col_spacer = st.columns([1, 1, 5])
     with col_all:
         if st.button("✅ Aceptar todas"):
-            for p in proposals:
+            for p in all_proposals:
                 st.session_state[f"grp_{p['group_id']}"] = True
             st.rerun()
     with col_none:
         if st.button("❌ Rechazar todas"):
-            for p in proposals:
+            for p in all_proposals:
                 st.session_state[f"grp_{p['group_id']}"] = False
             st.rerun()
 
@@ -249,6 +252,9 @@ if st.session_state.get("phase") == "validating":
         v = snap.get(key, default)
         return default if (v is None or str(v).strip() in ("", "nan", "None")) else v
 
+    # ── Agrupaciones normales: 1 banco → N JDE ──────────────────────
+    if proposals:
+        st.subheader("📦 1 banco → N JDE")
     for proposal in proposals:
         gid        = proposal["group_id"]
         bank_snap  = proposal["bank_snapshot"]
@@ -267,7 +273,7 @@ if st.session_state.get("phase") == "validating":
         )
 
         with st.expander(header, expanded=True):
-            checked = st.checkbox(
+            st.checkbox(
                 "✔ Aceptar esta agrupación",
                 key=f"grp_{gid}",
                 value=st.session_state.get(f"grp_{gid}", True),
@@ -287,7 +293,7 @@ if st.session_state.get("phase") == "validating":
                         "Tipo":        _safe(bank_snap, "tipo_banco",
                                              _safe(bank_snap, "movement_type")),
                     }]).style.format({"Monto": "{:,.2f}"}),
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -306,7 +312,74 @@ if st.session_state.get("phase") == "validating":
                     })
                 st.dataframe(
                     pd.DataFrame(jde_rows).style.format({"Monto": "{:,.2f}"}),
-                    width="stretch",
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            if abs(diff) >= 0.01:
+                st.caption(f"⚠ Diferencia de centavos: ${diff:,.2f}")
+
+        st.markdown("---")
+
+    # ── Agrupaciones inversas: N banco → 1 JDE ──────────────────────
+    if rev_proposals:
+        st.subheader("🔄 N banco → 1 JDE (comisiones y otros)")
+    for proposal in rev_proposals:
+        gid       = proposal["group_id"]
+        jde_snap  = proposal["jde_snapshot"]
+        bank_snaps = proposal["bank_snapshots"]
+        diff      = proposal["amount_difference"]
+        jde_monto = jde_snap.get("abs_amount", 0) or 0
+        jde_fecha = _fmt_date(jde_snap.get("movement_date", ""))
+        tienda    = _safe(jde_snap, "tienda")
+
+        header = (
+            f"Inv. Grupo {gid + 1} │ "
+            f"${jde_monto:,.2f} JDE │ "
+            f"{jde_fecha} │ "
+            f"Tienda: {tienda} │ "
+            f"{len(bank_snaps)} reg. banco"
+        )
+
+        with st.expander(header, expanded=True):
+            st.checkbox(
+                "✔ Aceptar esta agrupación",
+                key=f"grp_{gid}",
+                value=st.session_state.get(f"grp_{gid}", True),
+            )
+
+            col_b, col_j = st.columns(2)
+
+            with col_b:
+                st.markdown(f"**Movimientos bancarios ({len(bank_snaps)})**")
+                bank_rows = []
+                for snap in bank_snaps:
+                    bank_rows.append({
+                        "Cuenta":      _safe(snap, "account_id"),
+                        "Fecha":       _fmt_date(snap.get("movement_date", "")),
+                        "Descripción": _safe(snap, "description"),
+                        "Monto":       snap.get("abs_amount", 0) or 0,
+                        "Fuente":      _safe(snap, "bank"),
+                    })
+                st.dataframe(
+                    pd.DataFrame(bank_rows).style.format({"Monto": "{:,.2f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            with col_j:
+                st.markdown("**Registro JDE**")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Cuenta":      _safe(jde_snap, "account_id"),
+                        "Fecha":       jde_fecha,
+                        "Descripción": _safe(jde_snap, "description"),
+                        "Monto":       jde_monto,
+                        "Tienda":      tienda,
+                        "Tipo":        _safe(jde_snap, "tipo_jde",
+                                             _safe(jde_snap, "movement_type")),
+                    }]).style.format({"Monto": "{:,.2f}"}),
+                    use_container_width=True,
                     hide_index=True,
                 )
 
@@ -316,14 +389,14 @@ if st.session_state.get("phase") == "validating":
         st.markdown("---")
 
     accepted_count = sum(
-        1 for p in proposals
+        1 for p in all_proposals
         if st.session_state.get(f"grp_{p['group_id']}", True)
     )
-    st.markdown(f"**{accepted_count} de {len(proposals)} agrupaciones seleccionadas**")
+    st.markdown(f"**{accepted_count} de {len(all_proposals)} agrupaciones seleccionadas**")
 
     if st.button("✅ Confirmar selección y finalizar conciliación", type="primary"):
         approved_ids = {
-            p["group_id"] for p in proposals
+            p["group_id"] for p in all_proposals
             if st.session_state.get(f"grp_{p['group_id']}", True)
         }
         with st.spinner("Finalizando conciliación y generando reporte…"):
@@ -464,6 +537,23 @@ c5.metric("Pendientes Banco",   summary["pending_bank_count"],
 c6.metric("Pendientes JDE",     summary["pending_jde_count"],
           delta=f"-{summary['pending_jde_count']}" if summary["pending_jde_count"] else None,
           delta_color="inverse")
+
+# ── Suma total de diferencias en centavos ──────────────────────
+_all_diffs = (
+    [m["amount_difference"] for m in results.get("exact_matches", [])]
+    + [m["amount_difference"] for m in results.get("grouped_matches", [])]
+    + [m["amount_difference"] for m in results.get("reverse_grouped_matches", [])]
+)
+if _all_diffs:
+    _total_diff = round(sum(_all_diffs), 2)
+    _n_with_diff = sum(1 for d in _all_diffs if abs(d) >= 0.01)
+    _color = "normal" if abs(_total_diff) < 1.0 else "inverse"
+    st.metric(
+        label="Diferencia total en centavos (conciliados)",
+        value=f"${_total_diff:,.2f}",
+        delta=f"{_n_with_diff} match(es) con diferencia" if _n_with_diff else "Todos exactos al centavo",
+        delta_color=_color,
+    )
 
 st.markdown("---")
 

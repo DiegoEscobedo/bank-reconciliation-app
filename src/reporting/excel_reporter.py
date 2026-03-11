@@ -142,6 +142,18 @@ class ExcelReporter:
                 rec.update(_jde_rec(jde_row))
                 records.append(rec)
 
+        # Agrupados inversos: N banco → 1 JDE
+        for m in results.get("reverse_grouped_matches", []):
+            jde_row  = self._safe_get_row(jde_df, m["jde_row_index"])
+            jde_part = _jde_rec(jde_row)
+            # Una fila por cada movimiento bancario del grupo
+            for bank_idx in m["bank_row_indices"]:
+                bank_row = self._safe_get_row(bank_df, bank_idx)
+                rec = {"Tipo Match": "Agrup. Inv.", "Diferencia": m["amount_difference"]}
+                rec.update(_bank_rec(bank_row))
+                rec.update(jde_part)
+                records.append(rec)
+
         cols = [
             "Tipo Match",
             "Fecha Banco", "Cuenta Banco", "Fuente", "Tienda", "Tipo Pago", "Descripción Banco", "Monto Banco",
