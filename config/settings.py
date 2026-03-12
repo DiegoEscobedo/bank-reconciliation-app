@@ -16,8 +16,8 @@ TIENDA_ABBREV: dict[str, str] = {
     "OUTLET OJOCALIENTE":  "OUO",
     "O OJOCALIENTE":       "OUO",
     "O CALERA":            "OUC",   # alias usado en papel de trabajo
-    "OUTLET RIO GRANDE":   "OUT",
-    "O RIO GRANDE":        "OUT",
+    "OUTLET RIO GRANDE":   "RG",
+    "O RIO GRANDE":        "RG",
     "BOULEVARD":           "BLVD",
     "OUTLET ZACATECAS":    "OUZ",
     "TIENDA FRESNILLO":    "FRE",
@@ -26,9 +26,10 @@ TIENDA_ABBREV: dict[str, str] = {
     "GALERIAS":            "GAL",
     "OUTLET CALERA":       "OUC",
     "RIO GRANDE":          "RG",
+    "TIENDA RIO GRANDE":   "RG",
     # Abreviaturas directas (si el archivo ya trae la abreviatura)
     "FAB":  "FAB", "OUF": "OUF", "OUG": "OUG", "OUJ": "OUJ",
-    "OUO":  "OUO", "OUT": "OUT", "BLVD": "BLVD", "OUZ": "OUZ",
+    "OUO":  "OUO", "OUT": "RG",  "BLVD": "BLVD", "OUZ": "OUZ",
     "FRE":  "FRE", "JER": "JER", "JAL": "JAL",  "GAL": "GAL",
     "OUC":  "OUC", "RG":  "RG",
     # NetPay: columna Sucursal → abreviatura JDE
@@ -39,4 +40,28 @@ TIENDA_ABBREV: dict[str, str] = {
     "CESANTONI GUADALUPE": "OUG",
     "CESANTONI FLLO":      "FRE",
     "CESANTONI FRESNILLO": "FRE",
+    # Mercado Pago: columna Sucursal → abreviatura JDE
+    # Outlets (nombres completos y abreviados como vienen en MP)
+    "OUTLET CALERA":       "OUC",
+    "OUTLET FLLO":         "OUF",
+    "OUTLET FRESNILLO":    "OUF",
+    "OUTLET GPE":          "OUG",
+    "OUTLET GUADALUPE":    "OUG",
+    "OUTLET JALPA":        "JAL",
+    "OUTLET JEREZ":        "OUJ",
+    "OUTLET OJOCALIENTE":  "OUO",
+    "OUTLET RIO GRANDE":   "RG",
+    "OUTLET ZAC":          "OUZ",
+    "OUTLET ZACATECAS":    "OUZ",
+    # Tiendas (nombres completos y abreviados como vienen en MP)
+    "TIENDA BLVD":         "BLVD",
+    "TIENDA BOULEVARD":    "BLVD",
+    "TIENDA CALERA":       "OUC",
+    "TIENDA FAB":          "FAB",
+    "TIENDA FABRICA":      "FAB",
+    "TIENDA FLLO":         "FRE",
+    "TIENDA FRESNILLO":    "FRE",
+    "TIENDA GALERIAS":     "GAL",
+    "TIENDA JEREZ":        "JER",
+    "TIENDA JALPA":        "JAL",
 }

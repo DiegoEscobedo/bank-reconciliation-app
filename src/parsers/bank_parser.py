@@ -452,7 +452,18 @@ class _MercadoPagoParser(_BaseBankParser):
             "raw_deposit":        data.iloc[:, idx_amount].astype(str).str.strip(),
             "raw_withdrawal":     "",
         })
-        return result.reset_index(drop=True)
+        result = result.reset_index(drop=True)
+        # Mapear Sucursal → tienda (abreviatura JDE) usando TIENDA_ABBREV
+        result["tienda"] = (
+            sucursales.str.upper()
+            .map(_TIENDA_ABBREV)
+            .fillna("")
+        )
+        logger.info(
+            "[MERCADOPAGO] Primeras tiendas detectadas: %s",
+            result["tienda"].value_counts().to_dict(),
+        )
+        return result
 
 
 # ════════════════════════════════════════════════════════════
