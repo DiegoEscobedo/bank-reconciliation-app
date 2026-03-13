@@ -381,6 +381,7 @@ class _MercadoPagoParser(_BaseBankParser):
     _COL_FOLIO    = ("NÚMERO DE OPERACIÓN", "NUMERO DE OPERACION", "OPERACION", "FOLIO")
     _COL_DATE     = ("FECHA DE LA COMPRA",  "FECHA DE OPERACIÓN",  "FECHA DE OPERACION", "FECHA")
     _COL_STATUS   = ("ESTADO",)
+    _COL_STATUS_DESC = ("DESCRIPCIÓN DEL ESTADO", "DESCRIPCION DEL ESTADO")
     _COL_AMOUNT   = ("COBRO",)                          # monto bruto ← corregido
     _COL_SUCURSAL = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION")
 
@@ -388,6 +389,7 @@ class _MercadoPagoParser(_BaseBankParser):
     _FALLBACK_IDX_FOLIO    = 0
     _FALLBACK_IDX_DATE     = 1
     _FALLBACK_IDX_STATUS   = 2
+    _FALLBACK_IDX_STATUS_DESC = 3
     _FALLBACK_IDX_AMOUNT   = 4   # col4 = Cobro en el formato estándar de MP
     _FALLBACK_IDX_SUCURSAL = 34
 
@@ -408,21 +410,39 @@ class _MercadoPagoParser(_BaseBankParser):
         idx_folio    = self._resolve_col(header_row, self._COL_FOLIO,    self._FALLBACK_IDX_FOLIO)
         idx_date     = self._resolve_col(header_row, self._COL_DATE,     self._FALLBACK_IDX_DATE)
         idx_status   = self._resolve_col(header_row, self._COL_STATUS,   self._FALLBACK_IDX_STATUS)
+        idx_status_desc = self._resolve_col(
+            header_row,
+            self._COL_STATUS_DESC,
+            self._FALLBACK_IDX_STATUS_DESC,
+        )
         idx_amount   = self._resolve_col(header_row, self._COL_AMOUNT,   self._FALLBACK_IDX_AMOUNT)
         idx_sucursal = self._resolve_col(header_row, self._COL_SUCURSAL, self._FALLBACK_IDX_SUCURSAL)
 
         logger.info(
-            "[MERCADOPAGO] Columnas resueltas → folio=%d  fecha=%d  estado=%d  cobro=%d  sucursal=%d",
-            idx_folio, idx_date, idx_status, idx_amount, idx_sucursal,
+            "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d estado=%d estado_desc=%d cobro=%d sucursal=%d",
+            idx_folio, idx_date, idx_status, idx_status_desc, idx_amount, idx_sucursal,
         )
 
         data = raw.iloc[self._HEADER_ROW + 1:].copy().reset_index(drop=True)
 
-        # Filtrar solo aprobados con monto válido
-        status  = data.iloc[:, idx_status].astype(str).str.strip()
+        # Filtrar solo movimientos liquidados con monto válido.
+        # Regla de negocio: considerar únicamente filas cuya
+        # descripción de estado diga "El dinero ya está en tu cuenta de Mercado Pago."
+        status_desc = data.iloc[:, idx_status_desc].astype(str).str.strip()
+        status_desc_norm = (
+            status_desc
+            .str.lower()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+            .str.rstrip(".")
+        )
+        status_liquidado = (
+            status_desc_norm.eq("el dinero ya está en tu cuenta de mercado pago")
+            | status_desc_norm.eq("el dinero ya esta en tu cuenta de mercado pago")
+        )
         amounts = data.iloc[:, idx_amount].astype(str).str.strip()
         data = data[
-            status.str.lower().eq("aprobado") &
+            status_liquidado &
             amounts.ne("") & amounts.ne("nan") & amounts.ne("0")
         ].copy().reset_index(drop=True)
 

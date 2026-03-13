@@ -92,20 +92,23 @@ class JDENormalizer:
         df["document"]    = df["document"].fillna("").str.strip()
 
         # ── 5. Tienda + tipo_jde ─────────────────────────────────
-        # Si el parser ya suministró estos valores (Papel de Trabajo),
-        # solo completar los que falten con extracción de descripción.
-        if "tienda" not in df.columns:
-            df["tienda"] = None
+        # Regla de negocio: TIENDA siempre se toma de la descripción JDE
+        # (patrón PI ...), ignorando la columna TIENDA del archivo origen.
+        parsed_all = df["description"].apply(self._extract_tienda_tipo)
+        parsed_tienda = parsed_all.apply(lambda x: x[0])
+        parsed_tipo = parsed_all.apply(lambda x: x[1])
+
+        df["tienda"] = parsed_tienda.values
+
         if "tipo_jde" not in df.columns:
             df["tipo_jde"] = None
 
-        missing_mask = (
-            df["tienda"].isna() | (df["tienda"].astype(str).str.strip().isin(["", "nan", "None"]))
+        missing_tipo_mask = (
+            df["tipo_jde"].isna()
+            | (df["tipo_jde"].astype(str).str.strip().isin(["", "nan", "None"]))
         )
-        if missing_mask.any():
-            parsed = df.loc[missing_mask, "description"].apply(self._extract_tienda_tipo)
-            df.loc[missing_mask, "tienda"]   = parsed.apply(lambda x: x[0]).values
-            df.loc[missing_mask, "tipo_jde"] = parsed.apply(lambda x: x[1]).values
+        if missing_tipo_mask.any():
+            df.loc[missing_tipo_mask, "tipo_jde"] = parsed_tipo[missing_tipo_mask].values
 
         # ── 6. Origen ─────────────────────────────────────────────────
         df["source"] = self.SOURCE

@@ -40,6 +40,13 @@ TIENDA_ABBREV: dict[str, str] = {
     "CESANTONI GUADALUPE": "OUG",
     "CESANTONI FLLO":      "FRE",
     "CESANTONI FRESNILLO": "FRE",
+    "CESANTONI JALPA":     "JAL",
+    "CESANTONI JEREZ":     "JER",
+    "CESANTONI OJOCALIENTE": "OUO",
+    "CESANTONI RIO GRANDE":   "RG",
+    "CESANTONI ZACATECAS":   "OUZ",
+    "CESANTONI ZAC":          "OUZ",
+    "CESANTONI GALERIAS 1":      "GAL",
     # Mercado Pago: columna Sucursal → abreviatura JDE
     # Outlets (nombres completos y abreviados como vienen en MP)
     "OUTLET CALERA":       "OUC",

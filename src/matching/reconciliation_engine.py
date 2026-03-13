@@ -674,6 +674,28 @@ class ReconciliationEngine:
             if len(available_bank) < 2:
                 continue
 
+            # ── Filtro de tienda: los movimientos bancarios deben pertenecer
+            # a la misma tienda que el registro JDE.
+            # Si el JDE no tiene tienda, o el banco no tiene la columna,
+            # se deja pasar (sin info no se puede discriminar).
+            jde_tienda = ""
+            try:
+                _t = jde_row.get("tienda") if hasattr(jde_row, "get") else jde_row["tienda"]
+                if not pd.isna(_t) and str(_t).strip().upper() not in ("", "NAN", "NONE", "NA", "<NA>"):
+                    jde_tienda = str(_t).strip().upper()
+            except (KeyError, TypeError):
+                pass
+
+            if jde_tienda and "tienda" in available_bank.columns:
+                bank_tienda_upper = available_bank["tienda"].fillna("").str.strip().str.upper()
+                # Aceptar filas cuya tienda coincida con JDE o no tengan tienda asignada
+                available_bank = available_bank[
+                    (bank_tienda_upper == jde_tienda) | (bank_tienda_upper == "")
+                ].copy()
+
+            if len(available_bank) < 2:
+                continue
+
             candidate_rows = list(
                 available_bank.nsmallest(25, "abs_amount").iterrows()
             )
