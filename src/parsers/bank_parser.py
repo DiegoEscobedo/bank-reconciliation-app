@@ -478,6 +478,9 @@ class _MercadoPagoParser(_BaseBankParser):
                 "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d cobro=%d total_recibir=%d status=%d sucursal=%d",
                 idx_folio, idx_date, idx_amount, idx_total_recibir, idx_status, idx_sucursal,
             )
+            
+            # Debug: mostrar las columnas detectadas
+            logger.debug("[MERCADOPAGO] Header completo: %s", header_row[:15])
 
             # Iterar filas de datos y extraer colores
             data_rows = []
