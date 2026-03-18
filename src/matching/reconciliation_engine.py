@@ -781,6 +781,8 @@ class ReconciliationEngine:
         suma montos por color, e intenta matching de esos sumas contra
         movimientos bancarios.
         
+        Filtro adicional: Solo procesa filas con Estado="Aprobado"
+        
         Retorna lista de propuestas de tipo "color" con:
         - color: hex color string
         - jde_row_indices: list of JDE row indices para ese color
@@ -805,6 +807,15 @@ class ReconciliationEngine:
         for idx, row in jde_df.iterrows():
             color = str(row.get("cell_color", "")).strip().upper()
             if color not in ignored_colors:
+                # Filtro: solo procesar si Estado contiene "Aprobado"
+                raw_status = str(row.get("raw_status", "")).strip().lower()
+                if "aprobado" not in raw_status:
+                    logger.debug(
+                        "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s Estado='%s' - IGNORADA (no Aprobado)",
+                        idx, color, raw_status
+                    )
+                    continue  # Saltar esta fila
+                
                 if color not in color_groups:
                     color_groups[color] = []
                 color_groups[color].append((idx, row))
@@ -858,17 +869,18 @@ class ReconciliationEngine:
             
             if matched_bank_idx is not None:
                 logger.info(
-                    "[COLOR-MATCH] Color %s  sum=%.2f → banco idx=%d  diff=%.2f",
+                    "[COLOR-MATCH] Color %s sum=%.2f aprobado=True banco_idx=%d diff=%.2f",
                     color, color_sum, matched_bank_idx, matched_diff
                 )
             else:
                 logger.info(
-                    "[COLOR-UNMATCHED] Color %s  sum=%.2f  (no coincide en banco)",
+                    "[COLOR-UNMATCHED] Color %s sum=%.2f aprobado=True (sin match en banco)",
                     color, color_sum
                 )
             
             group_id += 1
         
+        logger.info("[COLOR-MATCH] Propuestas totales: %d grupos de color", len(proposals))
         return proposals
 
     # ============================================================

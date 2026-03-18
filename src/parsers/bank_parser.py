@@ -390,6 +390,7 @@ class _MercadoPagoParser(_BaseBankParser):
     _COL_DATE     = ("FECHA DE LA COMPRA",  "FECHA DE OPERACIÓN",  "FECHA DE OPERACION", "FECHA")
     _COL_AMOUNT   = ("COBRO",)                          # monto bruto
     _COL_TOTAL_RECIBIR = ("TOTALARECIBIR", "TOTAL A RECIBIR", "TOTAL ARECIBIR")  # para colores
+    _COL_STATUS   = ("ESTADO", "STATUS")                # filtro: solo "Aprobado"
     _COL_SUCURSAL = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION")
 
     # Índices de respaldo
@@ -397,6 +398,7 @@ class _MercadoPagoParser(_BaseBankParser):
     _FALLBACK_IDX_DATE     = 1
     _FALLBACK_IDX_AMOUNT   = 4
     _FALLBACK_IDX_TOTAL_RECIBIR = 8  # col8 = Total a recibir
+    _FALLBACK_IDX_STATUS   = 6       # col6 = Estado (por defecto)
     _FALLBACK_IDX_SUCURSAL = 34
 
     def _resolve_col(self, headers: list[str], names: tuple, fallback: int) -> int:
@@ -459,11 +461,12 @@ class _MercadoPagoParser(_BaseBankParser):
             idx_folio    = self._resolve_col(header_row, self._COL_FOLIO,    self._FALLBACK_IDX_FOLIO)
             idx_date     = self._resolve_col(header_row, self._COL_DATE,     self._FALLBACK_IDX_DATE)
             idx_amount   = self._resolve_col(header_row, self._COL_AMOUNT,   self._FALLBACK_IDX_AMOUNT)
+            idx_status   = self._resolve_col(header_row, self._COL_STATUS,   self._FALLBACK_IDX_STATUS)
             idx_sucursal = self._resolve_col(header_row, self._COL_SUCURSAL, self._FALLBACK_IDX_SUCURSAL)
 
             logger.info(
-                "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d cobro=%d total_recibir=%d sucursal=%d",
-                idx_folio, idx_date, idx_amount, idx_total_recibir, idx_sucursal,
+                "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d cobro=%d total_recibir=%d status=%d sucursal=%d",
+                idx_folio, idx_date, idx_amount, idx_total_recibir, idx_status, idx_sucursal,
             )
 
             # Iterar filas de datos y extraer colores
@@ -484,9 +487,15 @@ class _MercadoPagoParser(_BaseBankParser):
                 
                 row_data = raw.iloc[pandas_row_idx]
                 amounts_str = str(row_data.iloc[idx_amount]).strip()
+                status_text = str(row_data.iloc[idx_status]).strip().lower()
                 
                 # Filtrar filas sin monto válido
                 if amounts_str in ("", "nan", "0"):
+                    continue
+                
+                # Filtrar filas sin "Aprobado" en Estado
+                if "aprobado" not in status_text:
+                    logger.debug("[MERCADOPAGO] Fila %d ignorada: Estado='%s' (no Aprobado)", excel_row_idx, status_text)
                     continue
                 
                 data_rows.append({
@@ -495,6 +504,7 @@ class _MercadoPagoParser(_BaseBankParser):
                     "folio": str(row_data.iloc[idx_folio]).strip(),
                     "raw_date": str(row_data.iloc[idx_date]).strip(),
                     "raw_amount": amounts_str,
+                    "raw_status": status_text,
                     "raw_sucursal": str(row_data.iloc[idx_sucursal]).strip().replace("nan", ""),
                 })
             
@@ -525,7 +535,8 @@ class _MercadoPagoParser(_BaseBankParser):
                 "description_detail": data["folio"],
                 "raw_deposit":        data["raw_amount"],
                 "raw_withdrawal":     "",
-                "cell_color":         data["cell_color"],  # ← nuevo
+                "cell_color":         data["cell_color"],  # color de celda para grouping
+                "raw_status":         data["raw_status"],   # Estado (Aprobado, etc)
                 "_excel_row_idx":     data["excel_row_idx"],  # para write-back
             })
             
