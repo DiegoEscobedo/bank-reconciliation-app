@@ -791,9 +791,15 @@ class _ReporteCajaParser(_BaseBankParser):
         if result.empty:
             return result
 
+        # Stats sobre tiendas mapeadas vs no encontradas
+        tiendas_mapeadas = (result["tienda"] != "NO ENCONTRADO").sum()
+        tiendas_no_encontradas = (result["tienda"] == "NO ENCONTRADO").sum()
+
         # Agrupar multiples cuentas por si el reporte mezcla (6614, 4640…)
         accounts = result["account_id"].unique()
         logger.info("[REPORTE_CAJA] Cuentas detectadas: %s", accounts.tolist())
+        logger.info("[REPORTE_CAJA] Tiendas mapeadas: %d, No encontradas: %d", tiendas_mapeadas, tiendas_no_encontradas)
+        
         return result.reset_index(drop=True)
 
     @staticmethod
