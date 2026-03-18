@@ -105,8 +105,10 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         logger.info("Parseando archivo bancario: %s", bp)
         raw = BankParser().parse(str(bp))
         bank_name = raw["bank"].iloc[0] if ("bank" in raw.columns and not raw.empty) else ""
-        # Todos los archivos van a bank_dfs_raw para concatenación
-        bank_dfs_raw.append(raw)
+        if bank_name == "REPORTE_CAJA":
+            reporte_caja_dfs.append(raw)
+        else:
+            bank_dfs_raw.append(raw)
 
     logger.info("Parseando archivo JDE: %s", jde_file_path)
     jde_raw_df = JDEParser().parse(jde_file_path)
@@ -116,19 +118,33 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     bank_df = (
         _pd.concat(bank_normalized, ignore_index=True)
         if len(bank_normalized) > 1
-        else bank_normalized[0]
+        else (bank_normalized[0] if bank_normalized else _pd.DataFrame())
     )
 
+    # ── Enriquecimiento de REPORTE_CAJA para la cuenta 6614 ──────────────────────────────
+    # Solo se enriquecen movimientos de la 6614 con datos del REPORTE_CAJA
+    # (ignorando datos de otras cuentas como 7133, 3478, etc.)
     if reporte_caja_dfs:
-        reporte_norm = _pd.concat(
-            [BankNormalizer().normalize(r) for r in reporte_caja_dfs],
-            ignore_index=True,
-        )
-        bank_df = _enrich_bank_with_reporte(bank_df, reporte_norm)
-        logger.info(
-            "Banco enriquecido con REPORTE_CAJA: %d movimientos con tienda",
-            bank_df["tienda"].notna().sum() if "tienda" in bank_df.columns else 0,
-        )
+        logger.info("[ENRIQUECIMIENTO] %d archivo(s) REPORTE_CAJA disponible(s)", len(reporte_caja_dfs))
+        
+        # Concatenar todos los REPORTE_CAJA y normalizar
+        reporte_raw = _pd.concat(reporte_caja_dfs, ignore_index=True)
+        reporte_norm = BankNormalizer().normalize(reporte_raw)
+        
+        # Filtrar solo movimientos de la 6614
+        reporte_6614 = reporte_norm[reporte_norm["account_id"] == "6614"].copy() if not reporte_norm.empty else _pd.DataFrame()
+        
+        if not reporte_6614.empty:
+            logger.info("[ENRIQUECIMIENTO] Movimientos 6614 en REPORTE_CAJA: %d", len(reporte_6614))
+            
+            # Enriquecer NETPAY/otros bancos con datos de 6614
+            bank_df = _enrich_bank_with_reporte(bank_df, reporte_6614)
+            logger.info(
+                "[ENRIQUECIMIENTO] Banco enriquecido: %d movimientos con tienda mapeada",
+                (bank_df["tienda"] != "NO ENCONTRADO").sum() if "tienda" in bank_df.columns else 0,
+            )
+        else:
+            logger.info("[ENRIQUECIMIENTO] No hay movimientos 6614 en REPORTE_CAJA para enriquecer")
 
     logger.info("Normalizando movimientos JDE...")
     jde_df = JDENormalizer().normalize(jde_raw_df)
