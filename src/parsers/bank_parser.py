@@ -484,6 +484,7 @@ class _MercadoPagoParser(_BaseBankParser):
 
             # Iterar filas de datos y extraer colores
             data_rows = []
+            skipped_rows = []  # Para logging
             for excel_row_idx in range(self._HEADER_ROW + 2, ws.max_row + 1):  # +2 porque Excel es 1-indexed y saltamos header+1
                 cell_color = self._get_cell_color_hex(
                     ws[f"{col_letter_total}{excel_row_idx}"]
@@ -491,6 +492,7 @@ class _MercadoPagoParser(_BaseBankParser):
                 
                 # Si la fila no tiene color válido, saltarla
                 if cell_color is None:
+                    skipped_rows.append((excel_row_idx, "NO_COLOR"))
                     continue
                 
                 # Obtener datos de la fila desde pandas
@@ -502,9 +504,11 @@ class _MercadoPagoParser(_BaseBankParser):
                 amounts_str = str(row_data.iloc[idx_amount]).strip()
                 amount_normalized = self._normalize_amount(amounts_str)
                 status_text = str(row_data.iloc[idx_status]).strip().lower()
+                folio_text = str(row_data.iloc[idx_folio]).strip()
                 
                 # Filtrar filas sin monto válido
                 if amount_normalized in ("", "nan", "0", "0.0"):
+                    skipped_rows.append((excel_row_idx, f"EMPTY_AMOUNT:{amounts_str}"))
                     logger.debug("[MERCADOPAGO] Fila %d ignorada: monto vacío o 0", excel_row_idx)
                     continue
                 
@@ -512,23 +516,33 @@ class _MercadoPagoParser(_BaseBankParser):
                 try:
                     float(amount_normalized)
                 except ValueError:
+                    skipped_rows.append((excel_row_idx, f"INVALID_AMOUNT:{amount_normalized}"))
                     logger.debug("[MERCADOPAGO] Fila %d ignorada: monto inválido '%s' -> '%s'", excel_row_idx, amounts_str, amount_normalized)
                     continue
                 
                 # Filtrar filas sin "Aprobado" en Estado
                 if "aprobado" not in status_text:
+                    skipped_rows.append((excel_row_idx, f"STATUS:{status_text}"))
                     logger.debug("[MERCADOPAGO] Fila %d ignorada: Estado='%s' (no Aprobado)", excel_row_idx, status_text)
                     continue
+                
+                logger.debug("[MERCADOPAGO] Fila %d PROCESADA: folio=%s monto=%s status=%s color=%s",
+                           excel_row_idx, folio_text, amount_normalized, status_text, cell_color)
                 
                 data_rows.append({
                     "excel_row_idx": excel_row_idx,
                     "cell_color": cell_color,
-                    "folio": str(row_data.iloc[idx_folio]).strip(),
+                    "folio": folio_text,
                     "raw_date": str(row_data.iloc[idx_date]).strip(),
                     "raw_amount": amount_normalized,  # NORMALIZADO: sin $ ni comas
                     "raw_status": status_text,
                     "raw_sucursal": str(row_data.iloc[idx_sucursal]).strip().replace("nan", ""),
                 })
+            
+            logger.info("[MERCADOPAGO] Resumen de parseo: %d rows procesadas, %d rows descartadas", 
+                       len(data_rows), len(skipped_rows))
+            if skipped_rows:
+                logger.debug("[MERCADOPAGO] Filas descartadas: %s", skipped_rows[:10])
             
             if not data_rows:
                 logger.warning("[MERCADOPAGO] No se encontraron filas con colores válidos")
