@@ -422,6 +422,16 @@ class _MercadoPagoParser(_BaseBankParser):
         ignored = {"FFFFFFFF", "00000000", "FFFFC0C0C0", "FFC0C0C0"}
         return str(color).upper() in ignored or str(color) == "00000000"
 
+    def _normalize_amount(self, amount_str: str) -> str:
+        """Normaliza monto: remueve $, convierte coma a punto, etc."""
+        # Remover espacios y símbolo $
+        normalized = amount_str.strip().replace("$", "").strip()
+        # Cambiar coma por punto (formato español → formato float)
+        normalized = normalized.replace(",", ".")
+        # Remover espacios internos
+        normalized = normalized.replace(" ", "")
+        return normalized
+
     def _get_cell_color_hex(self, cell) -> str | None:
         """Extrae el color RGB de una celda y lo devuelve como string hex, o None si debe ignorarse."""
         try:
@@ -487,10 +497,19 @@ class _MercadoPagoParser(_BaseBankParser):
                 
                 row_data = raw.iloc[pandas_row_idx]
                 amounts_str = str(row_data.iloc[idx_amount]).strip()
+                amount_normalized = self._normalize_amount(amounts_str)
                 status_text = str(row_data.iloc[idx_status]).strip().lower()
                 
                 # Filtrar filas sin monto válido
-                if amounts_str in ("", "nan", "0"):
+                if amount_normalized in ("", "nan", "0", "0.0"):
+                    logger.debug("[MERCADOPAGO] Fila %d ignorada: monto vacío o 0", excel_row_idx)
+                    continue
+                
+                # Validar que el monto sea convertible a float
+                try:
+                    float(amount_normalized)
+                except ValueError:
+                    logger.debug("[MERCADOPAGO] Fila %d ignorada: monto inválido '%s' -> '%s'", excel_row_idx, amounts_str, amount_normalized)
                     continue
                 
                 # Filtrar filas sin "Aprobado" en Estado
@@ -503,7 +522,7 @@ class _MercadoPagoParser(_BaseBankParser):
                     "cell_color": cell_color,
                     "folio": str(row_data.iloc[idx_folio]).strip(),
                     "raw_date": str(row_data.iloc[idx_date]).strip(),
-                    "raw_amount": amounts_str,
+                    "raw_amount": amount_normalized,  # NORMALIZADO: sin $ ni comas
                     "raw_status": status_text,
                     "raw_sucursal": str(row_data.iloc[idx_sucursal]).strip().replace("nan", ""),
                 })

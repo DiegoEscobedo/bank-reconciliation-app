@@ -825,13 +825,16 @@ class ReconciliationEngine:
         
         for color, jde_rows in color_groups.items():
             # Sumar montos del grupo de color
-            color_sum = round(
-                sum(
-                    float(r["raw_deposit"]) if pd.notna(r.get("raw_deposit")) else 0.0
-                    for _, r in jde_rows
-                ),
-                self.rounding_decimals
-            )
+            color_sum = 0.0
+            for idx, r in jde_rows:
+                try:
+                    amount = float(r["raw_deposit"]) if pd.notna(r.get("raw_deposit")) else 0.0
+                    color_sum += amount
+                except (ValueError, TypeError) as e:
+                    logger.warning("[COLOR-MATCH] Fila JDE idx=%d: no se pudo convertir monto '%s' a float (%s)", 
+                                 idx, r.get("raw_deposit"), str(e))
+            
+            color_sum = round(color_sum, self.rounding_decimals)
             
             if color_sum == 0.0:
                 continue  # Ignorar colores sin movimiento
