@@ -766,11 +766,14 @@ class _ReporteCajaParser(_BaseBankParser):
             account_id = self._extract_account_from_banco(banco)
 
             # Mapear tienda a abreviatura JDE
-            tienda_abbrev = _TIENDA_ABBREV.get(tienda_raw.upper(), None)
+            tienda_abbrev = _TIENDA_ABBREV.get(tienda_raw.upper(), "NO ENCONTRADO")
 
-            # Tipo banco: TR / TPV / None (efectivo sin tipo explícito)
+            # Tipo banco: TR / TPV / vacío (si tienda existe) o vacío (si no existe)
             obs_clean = obs.strip().upper()
-            tipo_banco = obs_clean if obs_clean in ("TR", "TPV") else None
+            if tienda_abbrev == "NO ENCONTRADO":
+                tipo_banco = ""  # Sin tipo de pago cuando tienda no existe
+            else:
+                tipo_banco = obs_clean if obs_clean in ("TR", "TPV") else None
 
             rows.append({
                 "account_id":        account_id,
