@@ -105,15 +105,8 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         logger.info("Parseando archivo bancario: %s", bp)
         raw = BankParser().parse(str(bp))
         bank_name = raw["bank"].iloc[0] if ("bank" in raw.columns and not raw.empty) else ""
-        if bank_name == "REPORTE_CAJA":
-            reporte_caja_dfs.append(raw)
-        else:
-            bank_dfs_raw.append(raw)
-
-    if not bank_dfs_raw and reporte_caja_dfs:
-        logger.info("Solo REPORTE_CAJA disponible — usándolo como fuente bancaria.")
-        bank_dfs_raw     = reporte_caja_dfs
-        reporte_caja_dfs = []
+        # Todos los archivos van a bank_dfs_raw para concatenación
+        bank_dfs_raw.append(raw)
 
     logger.info("Parseando archivo JDE: %s", jde_file_path)
     jde_raw_df = JDEParser().parse(jde_file_path)
