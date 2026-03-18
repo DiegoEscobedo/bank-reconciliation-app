@@ -98,15 +98,53 @@ class _BBVAParser(_BaseBankParser):
         account_id = self._extract_account(df)
         logger.info("[BBVA] Cuenta detectada: %s", account_id)
 
-        # Renombrar a nombres canónicos para el normalizador
-        rename_map = {
-            self._COL_FECHA:     "raw_date",
-            self._COL_DESC:      "description",
-            self._COL_DESC_DET:  "description_detail",
-            self._COL_DEPOSITOS: "raw_deposit",
-            self._COL_RETIROS:   "raw_withdrawal",
+        # Normalizar nombres de columnas: remover acentos y espacios extra
+        import unicodedata as _unicodedata
+        
+        def _normalize_col_name(s: str) -> str:
+            """Quitar acentos y espacios extra de nombres de columna."""
+            s = str(s).strip().upper()
+            s = "".join(
+                c for c in _unicodedata.normalize("NFD", s)
+                if _unicodedata.category(c) != "Mn"
+            )
+            return s
+        
+        # Crear mapeo normalized → actual
+        normalized_to_actual = {
+            _normalize_col_name(col): col for col in df.columns
         }
+        
+        # Renombrar a nombres canónicos, siendo flexible con acentos/espacios
+        rename_map = {}
+        for old_name, new_name in [
+            (self._COL_FECHA,     "raw_date"),
+            (self._COL_DESC,      "description"),
+            (self._COL_DESC_DET,  "description_detail"),
+            (self._COL_DEPOSITOS, "raw_deposit"),
+            (self._COL_RETIROS,   "raw_withdrawal"),
+        ]:
+            norm_old = _normalize_col_name(old_name)
+            if norm_old in normalized_to_actual:
+                actual_col = normalized_to_actual[norm_old]
+                rename_map[actual_col] = new_name
+                logger.debug(f"[BBVA] Mapeado {old_name!r} → {actual_col!r} → {new_name!r}")
+        
         df = df.rename(columns=rename_map)
+
+        # Validar que tenemos las columnas mínimas necesarias
+        if "raw_date" not in df.columns:
+            raise ValueError(
+                f"[BBVA] No se encontró la columna de fecha. "
+                f"Columnas disponibles: {df.columns.tolist()}\n"
+                f"Se esperaba 'FECHA DE OPERACIÓN', encontradas: "
+                f"{[c for c in df.columns if 'FECHA' in c.upper()]}"
+            )
+        if "raw_deposit" not in df.columns and "raw_withdrawal" not in df.columns:
+            raise ValueError(
+                f"[BBVA] No se encontraron columnas de depósitos/retiros. "
+                f"Columnas disponibles: {df.columns.tolist()}"
+            )
 
         # Filtrar filas sin fecha válida
         df = df[df["raw_date"].apply(looks_like_date)].copy()
@@ -157,14 +195,47 @@ class _BanorteParser(_BaseBankParser):
         df.columns = header
         df = df.reset_index(drop=True)
 
-        rename_map = {
-            self._COL_FECHA:    "raw_date",
-            self._COL_CONCEPTO: "description",
-            self._COL_REF_AMP:  "description_detail",
-            self._COL_CARGO:    "raw_withdrawal",   # Cargo = dinero sale
-            self._COL_ABONO:    "raw_deposit",      # Abono = dinero entra
+        # Normalizar nombres de columnas (como en BBVA)
+        import unicodedata as _unicodedata
+        
+        def _normalize_col_name(s: str) -> str:
+            s = str(s).strip().upper()
+            s = "".join(
+                c for c in _unicodedata.normalize("NFD", s)
+                if _unicodedata.category(c) != "Mn"
+            )
+            return s
+        
+        normalized_to_actual = {
+            _normalize_col_name(col): col for col in df.columns
         }
+        
+        rename_map = {}
+        for old_name, new_name in [
+            (self._COL_FECHA,    "raw_date"),
+            (self._COL_CONCEPTO, "description"),
+            (self._COL_REF_AMP,  "description_detail"),
+            (self._COL_CARGO,    "raw_withdrawal"),
+            (self._COL_ABONO,    "raw_deposit"),
+        ]:
+            norm_old = _normalize_col_name(old_name)
+            if norm_old in normalized_to_actual:
+                actual_col = normalized_to_actual[norm_old]
+                rename_map[actual_col] = new_name
+        
         df = df.rename(columns=rename_map)
+
+        # Validar columnas mínimas
+        if "raw_date" not in df.columns:
+            raise ValueError(
+                f"[BANORTE] No se encontró columna de fecha. "
+                f"Disponibles: {df.columns.tolist()}"
+            )
+        if "raw_deposit" not in df.columns and "raw_withdrawal" not in df.columns:
+            raise ValueError(
+                f"[BANORTE] No se encontraron Cargo/Abono. "
+                f"Disponibles: {df.columns.tolist()}"
+            )
 
         # Filtrar filas sin fecha válida
         df = df[df["raw_date"].apply(looks_like_date)].copy()
