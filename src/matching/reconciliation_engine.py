@@ -87,12 +87,16 @@ class ReconciliationEngine:
             bank_df, jde_df, proposed_groups, start_group_id=next_id
         )
 
+        # Color-based matching para Mercado Pago
+        proposed_color = self._propose_color_based_matches(bank_df, jde_df)
+
         return {
             "_bank_df_full":                    bank_df,
             "_jde_df_full":                     jde_df,
             "exact_matches":                    exact_matches,
             "proposed_grouped_matches":         proposed_groups,
             "proposed_reverse_grouped_matches": proposed_reverse,
+            "proposed_color_based_matches":     proposed_color,
         }
 
     def confirm_grouped_matches(self, interactive_result, approved_group_ids):
@@ -143,6 +147,39 @@ class ReconciliationEngine:
                 "amount_difference": proposal["amount_difference"],
             })
 
+        # ── Color-based matches (Mercado Pago) ──────────────────────
+        confirmed_color: list = []
+        for proposal in interactive_result.get("proposed_color_based_matches", []):
+            if proposal["group_id"] not in approved_group_ids:
+                continue
+            
+            # Verificar que JDE y banco aún no estén matched
+            jde_already_matched = any(jde_df.at[ji, "is_matched"] for ji in proposal["jde_row_indices"])
+            if jde_already_matched:
+                continue
+            
+            bank_idx = proposal.get("matched_bank_row_index")
+            if bank_idx is not None and bank_df.at[bank_idx, "is_matched"]:
+                continue
+            
+            # Marcar JDE como conciliadas
+            for ji in proposal["jde_row_indices"]:
+                jde_df.at[ji, "is_matched"] = True
+            
+            # Marcar BANCO como conciliado (si hay match)
+            if bank_idx is not None:
+                bank_df.at[bank_idx, "is_matched"] = True
+            
+            confirmed_color.append({
+                "match_type":         "color_based",
+                "color":              proposal["color"],
+                "jde_row_indices":    proposal["jde_row_indices"],
+                "bank_row_index":     bank_idx,
+                "color_sum":          proposal["jde_color_sum"],
+                "amount_difference":  proposal["amount_difference"],
+                "is_matched":         bank_idx is not None,
+            })
+
         conciliated_bank = bank_df[bank_df["is_matched"]].copy()
         conciliated_jde  = jde_df[jde_df["is_matched"]].copy()
         pending_bank     = bank_df[~bank_df["is_matched"]].copy()
@@ -154,6 +191,7 @@ class ReconciliationEngine:
             "exact_matches_count":           len(interactive_result["exact_matches"]),
             "grouped_matches_count":         len(confirmed_grouped),
             "reverse_grouped_matches_count": len(confirmed_reverse),
+            "color_based_matches_count":     len(confirmed_color),
             "pending_bank_count":            len(pending_bank),
             "pending_jde_count":             len(pending_jde),
         }
@@ -166,8 +204,10 @@ class ReconciliationEngine:
             "exact_matches":                    interactive_result["exact_matches"],
             "grouped_matches":                  confirmed_grouped,
             "reverse_grouped_matches":          confirmed_reverse,
+            "color_based_matches":              confirmed_color,
             "proposed_grouped_matches":         interactive_result["proposed_grouped_matches"],
             "proposed_reverse_grouped_matches": interactive_result.get("proposed_reverse_grouped_matches", []),
+            "proposed_color_based_matches":     interactive_result.get("proposed_color_based_matches", []),
             "summary":                          summary,
             "_bank_df_full":                    bank_df,
             "_jde_df_full":                     jde_df,
@@ -729,6 +769,106 @@ class ReconciliationEngine:
                 jde_index, target_amount, len(bank_indices), diff,
             )
 
+        return proposals
+
+    # ============================================================
+    # COLOR-BASED MATCHING (Mercado Pago)
+    # ============================================================
+
+    def _propose_color_based_matches(self, bank_dataframe, jde_dataframe):
+        """
+        Para Mercado Pago: agrupa filas por color de celda ("cell_color"),
+        suma montos por color, e intenta matching de esos sumas contra
+        movimientos bancarios.
+        
+        Retorna lista de propuestas de tipo "color" con:
+        - color: hex color string
+        - jde_row_indices: list of JDE row indices para ese color
+        - jde_color_sum: suma total del color
+        - matched_bank_row_index: índice del movimiento banco (si hay match)
+        - amount_difference: diferencia de montos
+        """
+        proposals = []
+        
+        # Si JDE no tiene "cell_color", no hay matching por color
+        if "cell_color" not in jde_dataframe.columns:
+            return proposals
+        
+        # Agrupar por color (ignorar NaN / None / vacío)
+        jde_df = jde_dataframe.copy()
+        jde_df["cell_color"] = jde_df["cell_color"].fillna("")
+        
+        # Colores a ignorar (blanco, gris claro, vacío)
+        ignored_colors = {"", "FFFFFFFF", "FFC0C0C0", "FFC0C0C0C0"}
+        color_groups = {}
+        
+        for idx, row in jde_df.iterrows():
+            color = str(row.get("cell_color", "")).strip().upper()
+            if color not in ignored_colors:
+                if color not in color_groups:
+                    color_groups[color] = []
+                color_groups[color].append((idx, row))
+        
+        # Por cada grupo de color, buscar matching
+        group_id = 1000  # Usar IDs altos para no colisionar con otros matching types
+        
+        for color, jde_rows in color_groups.items():
+            # Sumar montos del grupo de color
+            color_sum = round(
+                sum(
+                    float(r["raw_deposit"]) if pd.notna(r.get("raw_deposit")) else 0.0
+                    for _, r in jde_rows
+                ),
+                self.rounding_decimals
+            )
+            
+            if color_sum == 0.0:
+                continue  # Ignorar colores sin movimiento
+            
+            # Buscar match exacto en banco
+            matched_bank_idx = None
+            matched_diff = None
+            
+            for bank_idx, bank_row in bank_dataframe.iterrows():
+                if bank_dataframe.at[bank_idx, "is_matched"]:
+                    continue  # Ya fue conciliado
+                
+                bank_amount = round(
+                    float(bank_row.get("raw_deposit", 0.0)) if pd.notna(bank_row.get("raw_deposit")) else 0.0,
+                    self.rounding_decimals
+                )
+                
+                if self._is_amount_within_tolerance(color_sum, bank_amount):
+                    matched_bank_idx = bank_idx
+                    matched_diff = round(color_sum - bank_amount, self.rounding_decimals)
+                    break
+            
+            jde_indices = [idx for idx, _ in jde_rows]
+            
+            proposals.append({
+                "group_id":            group_id,
+                "match_type":          "color_based",
+                "color":               color,
+                "jde_row_indices":     jde_indices,
+                "jde_color_sum":       color_sum,
+                "matched_bank_row_index": matched_bank_idx,
+                "amount_difference":   matched_diff if matched_bank_idx is not None else None,
+                "is_matched":          matched_bank_idx is not None,
+            })
+            
+            if matched_bank_idx is not None:
+                logger.info(
+                    "[COLOR-MATCH] Color %s  sum=%.2f → banco idx=%d  diff=%.2f",
+                    color, color_sum, matched_bank_idx, matched_diff
+                )
+            else:
+                logger.info(
+                    "[COLOR-UNMATCHED] Color %s  sum=%.2f  (no coincide en banco)",
+                    color, color_sum
+                )
+            
+            group_id += 1
+        
         return proposals
 
     # ============================================================

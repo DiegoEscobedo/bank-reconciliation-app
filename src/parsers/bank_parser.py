@@ -13,6 +13,8 @@ de _BaseBankParser y registrándolo en BankParser._PARSERS.
 """
 
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
 from config.settings import TIENDA_ABBREV as _TIENDA_ABBREV
 from src.utils.date_utils import looks_like_date, parse_date_spanish
@@ -363,12 +365,18 @@ class _MercadoPagoParser(_BaseBankParser):
     Formato Mercado Pago (Excel):
         Fila 3  → header con 38 columnas
         Fila 4+ → datos
+    
+    NUEVA LÓGICA: Lee colores de la celda en columna "Total a recibir" (col8).
+    Solo procesa filas con color (descarta blanco y gris claro).
+    Agrupa por color y suma montos para matching.
+    
     Columnas usadas (buscadas por nombre en la fila de cabecera):
         'Número de operación'  → folio
         'Fecha de la compra'   → fecha  ('18 feb 19:14 hs')
-        'Estado'               → filtro (solo 'Aprobado')
         'Cobro'                → monto bruto cobrado al comprador
+        'Total a recibir'      → **COLUMNA CON COLORES** (para agrupar)
         Sucursal/descripción   → última columna no-vacía o col34
+    
     Todos son DEPÓSITOS. account_id = "7133" (Scotiabank destino).
     """
 
@@ -380,17 +388,15 @@ class _MercadoPagoParser(_BaseBankParser):
     # Nombres de columna a buscar (en orden de prioridad, case-insensitive)
     _COL_FOLIO    = ("NÚMERO DE OPERACIÓN", "NUMERO DE OPERACION", "OPERACION", "FOLIO")
     _COL_DATE     = ("FECHA DE LA COMPRA",  "FECHA DE OPERACIÓN",  "FECHA DE OPERACION", "FECHA")
-    _COL_STATUS   = ("ESTADO",)
-    _COL_STATUS_DESC = ("DESCRIPCIÓN DEL ESTADO", "DESCRIPCION DEL ESTADO")
-    _COL_AMOUNT   = ("COBRO",)                          # monto bruto ← corregido
+    _COL_AMOUNT   = ("COBRO",)                          # monto bruto
+    _COL_TOTAL_RECIBIR = ("TOTALARECIBIR", "TOTAL A RECIBIR", "TOTAL ARECIBIR")  # para colores
     _COL_SUCURSAL = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION")
 
-    # Índices de respaldo si los encabezados no coinciden
+    # Índices de respaldo
     _FALLBACK_IDX_FOLIO    = 0
     _FALLBACK_IDX_DATE     = 1
-    _FALLBACK_IDX_STATUS   = 2
-    _FALLBACK_IDX_STATUS_DESC = 3
-    _FALLBACK_IDX_AMOUNT   = 4   # col4 = Cobro en el formato estándar de MP
+    _FALLBACK_IDX_AMOUNT   = 4
+    _FALLBACK_IDX_TOTAL_RECIBIR = 8  # col8 = Total a recibir
     _FALLBACK_IDX_SUCURSAL = 34
 
     def _resolve_col(self, headers: list[str], names: tuple, fallback: int) -> int:
@@ -403,87 +409,148 @@ class _MercadoPagoParser(_BaseBankParser):
                 continue
         return fallback
 
-    def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
-        # Leer cabeceras de la fila _HEADER_ROW para resolver índices por nombre
-        header_row = raw.iloc[self._HEADER_ROW].astype(str).tolist()
+    def _is_color_ignored(self, fill: PatternFill) -> bool:
+        """Devuelve True si el color debe ignorarse (blanco o gris claro)."""
+        if not fill or not fill.fgColor:
+            return True
+        color = fill.fgColor.rgb
+        if not color:
+            return True
+        # Colores a ignorar: blanco (FFFFFFFF), gris claro (FFFFC0C0C0), y variantes
+        ignored = {"FFFFFFFF", "00000000", "FFFFC0C0C0", "FFC0C0C0"}
+        return str(color).upper() in ignored or str(color) == "00000000"
 
-        idx_folio    = self._resolve_col(header_row, self._COL_FOLIO,    self._FALLBACK_IDX_FOLIO)
-        idx_date     = self._resolve_col(header_row, self._COL_DATE,     self._FALLBACK_IDX_DATE)
-        idx_status   = self._resolve_col(header_row, self._COL_STATUS,   self._FALLBACK_IDX_STATUS)
-        idx_status_desc = self._resolve_col(
-            header_row,
-            self._COL_STATUS_DESC,
-            self._FALLBACK_IDX_STATUS_DESC,
-        )
-        idx_amount   = self._resolve_col(header_row, self._COL_AMOUNT,   self._FALLBACK_IDX_AMOUNT)
-        idx_sucursal = self._resolve_col(header_row, self._COL_SUCURSAL, self._FALLBACK_IDX_SUCURSAL)
+    def _get_cell_color_hex(self, cell) -> str | None:
+        """Extrae el color RGB de una celda y lo devuelve como string hex, o None si debe ignorarse."""
+        try:
+            fill = cell.fill
+            if self._is_color_ignored(fill):
+                return None
+            color = fill.fgColor.rgb
+            if color:
+                return str(color).upper()
+        except (AttributeError, TypeError):
+            pass
+        return None
 
-        logger.info(
-            "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d estado=%d estado_desc=%d cobro=%d sucursal=%d",
-            idx_folio, idx_date, idx_status, idx_status_desc, idx_amount, idx_sucursal,
-        )
+    def parse(self, file_path: str) -> pd.DataFrame:
+        """Parsea Mercado Pago desde Excel, extrayendo colores de las celdas."""
+        logger.info("[MERCADOPAGO] Parseando: %s", file_path)
+        
+        try:
+            # Leer con pandas para obtener datos
+            raw = pd.read_excel(file_path, header=None, dtype=str).fillna("")
+            
+            # Leer con openpyxl para obtener colores
+            wb = load_workbook(file_path)
+            ws = wb.active
+            
+            # Encontrar columna de "Total a recibir" para leer colores
+            header_row = raw.iloc[self._HEADER_ROW].astype(str).tolist()
+            idx_total_recibir = self._resolve_col(
+                header_row,
+                self._COL_TOTAL_RECIBIR,
+                self._FALLBACK_IDX_TOTAL_RECIBIR,
+            )
+            # En Excel, las columnas son 1-indexed
+            col_letter_total = chr(65 + idx_total_recibir)
+            
+            # Resolver otros índices
+            idx_folio    = self._resolve_col(header_row, self._COL_FOLIO,    self._FALLBACK_IDX_FOLIO)
+            idx_date     = self._resolve_col(header_row, self._COL_DATE,     self._FALLBACK_IDX_DATE)
+            idx_amount   = self._resolve_col(header_row, self._COL_AMOUNT,   self._FALLBACK_IDX_AMOUNT)
+            idx_sucursal = self._resolve_col(header_row, self._COL_SUCURSAL, self._FALLBACK_IDX_SUCURSAL)
 
-        data = raw.iloc[self._HEADER_ROW + 1:].copy().reset_index(drop=True)
+            logger.info(
+                "[MERCADOPAGO] Columnas resueltas → folio=%d fecha=%d cobro=%d total_recibir=%d sucursal=%d",
+                idx_folio, idx_date, idx_amount, idx_total_recibir, idx_sucursal,
+            )
 
-        # Filtrar solo movimientos liquidados con monto válido.
-        # Regla de negocio: considerar únicamente filas cuya
-        # descripción de estado diga "El dinero ya está en tu cuenta de Mercado Pago."
-        status_desc = data.iloc[:, idx_status_desc].astype(str).str.strip()
-        status_desc_norm = (
-            status_desc
-            .str.lower()
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-            .str.rstrip(".")
-        )
-        status_liquidado = (
-            status_desc_norm.eq("el dinero ya está en tu cuenta de mercado pago")
-            | status_desc_norm.eq("el dinero ya esta en tu cuenta de mercado pago")
-        )
-        amounts = data.iloc[:, idx_amount].astype(str).str.strip()
-        data = data[
-            status_liquidado &
-            amounts.ne("") & amounts.ne("nan") & amounts.ne("0")
-        ].copy().reset_index(drop=True)
-
-        if data.empty:
+            # Iterar filas de datos y extraer colores
+            data_rows = []
+            for excel_row_idx in range(self._HEADER_ROW + 2, ws.max_row + 1):  # +2 porque Excel es 1-indexed y saltamos header+1
+                cell_color = self._get_cell_color_hex(
+                    ws[f"{col_letter_total}{excel_row_idx}"]
+                )
+                
+                # Si la fila no tiene color válido, saltarla
+                if cell_color is None:
+                    continue
+                
+                # Obtener datos de la fila desde pandas
+                pandas_row_idx = excel_row_idx - self._HEADER_ROW - 2
+                if pandas_row_idx >= len(raw):
+                    break
+                
+                row_data = raw.iloc[pandas_row_idx]
+                amounts_str = str(row_data.iloc[idx_amount]).strip()
+                
+                # Filtrar filas sin monto válido
+                if amounts_str in ("", "nan", "0"):
+                    continue
+                
+                data_rows.append({
+                    "excel_row_idx": excel_row_idx,
+                    "cell_color": cell_color,
+                    "folio": str(row_data.iloc[idx_folio]).strip(),
+                    "raw_date": str(row_data.iloc[idx_date]).strip(),
+                    "raw_amount": amounts_str,
+                    "raw_sucursal": str(row_data.iloc[idx_sucursal]).strip().replace("nan", ""),
+                })
+            
+            if not data_rows:
+                logger.warning("[MERCADOPAGO] No se encontraron filas con colores válidos")
+                return pd.DataFrame(columns=["account_id", "bank", "raw_date",
+                                             "description", "description_detail",
+                                             "raw_deposit", "raw_withdrawal", "cell_color"])
+            
+            # Convertir a DataFrame
+            data = pd.DataFrame(data_rows)
+            
+            logger.info("[MERCADOPAGO] %d filas con color encontradas. Colores únicos: %s",
+                        len(data), data["cell_color"].nunique())
+            logger.info("[MERCADOPAGO] Colores detectados: %s", sorted(data["cell_color"].unique()))
+            
+            # Convertir fechas
+            dates_fmt = data["raw_date"].apply(
+                lambda v: parse_date_spanish(v).strftime("%d/%m/%Y")
+                if parse_date_spanish(v) is not pd.NaT else v
+            )
+            
+            result = pd.DataFrame({
+                "account_id":         self._DESTINATION_ACT,
+                "bank":               self.BANK_NAME,
+                "raw_date":           dates_fmt,
+                "description":        "MERCADO PAGO | " + data["raw_sucursal"],
+                "description_detail": data["folio"],
+                "raw_deposit":        data["raw_amount"],
+                "raw_withdrawal":     "",
+                "cell_color":         data["cell_color"],  # ← nuevo
+                "_excel_row_idx":     data["excel_row_idx"],  # para write-back
+            })
+            
+            # Mapear tienda
+            result["tienda"] = (
+                data["raw_sucursal"].str.upper()
+                .map(_TIENDA_ABBREV)
+                .fillna("")
+            )
+            
+            logger.info("[MERCADOPAGO] Movimientos procesados: %d", len(result))
+            logger.info("[MERCADOPAGO] Tiendas detectadas: %s", result["tienda"].value_counts().to_dict())
+            
+            return result.reset_index(drop=True)
+            
+        except Exception as e:
+            logger.error("[MERCADOPAGO] Error parseando: %s", str(e))
             return pd.DataFrame(columns=["account_id", "bank", "raw_date",
                                          "description", "description_detail",
-                                         "raw_deposit", "raw_withdrawal"])
+                                         "raw_deposit", "raw_withdrawal", "cell_color"])
 
-        logger.info("[MERCADOPAGO] Cuenta destino: %s", self._DESTINATION_ACT)
-
-        # Las fechas vienen como '18 feb 19:14 hs' → convertir a DD/MM/YYYY
-        dates_raw = data.iloc[:, idx_date].astype(str).str.strip()
-        dates_fmt = dates_raw.apply(
-            lambda v: parse_date_spanish(v).strftime("%d/%m/%Y")
-            if parse_date_spanish(v) is not pd.NaT else v
-        )
-
-        folio      = data.iloc[:, idx_folio].astype(str).str.strip()
-        sucursales = data.iloc[:, idx_sucursal].astype(str).str.strip().replace("nan", "")
-
-        result = pd.DataFrame({
-            "account_id":         self._DESTINATION_ACT,
-            "bank":               self.BANK_NAME,
-            "raw_date":           dates_fmt,
-            "description":        "MERCADO PAGO | " + sucursales,
-            "description_detail": folio,
-            "raw_deposit":        data.iloc[:, idx_amount].astype(str).str.strip(),
-            "raw_withdrawal":     "",
-        })
-        result = result.reset_index(drop=True)
-        # Mapear Sucursal → tienda (abreviatura JDE) usando TIENDA_ABBREV
-        result["tienda"] = (
-            sucursales.str.upper()
-            .map(_TIENDA_ABBREV)
-            .fillna("")
-        )
-        logger.info(
-            "[MERCADOPAGO] Primeras tiendas detectadas: %s",
-            result["tienda"].value_counts().to_dict(),
-        )
-        return result
+    def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
+        """Este método ya no se usa; parse() es el punto de entrada."""
+        logger.warning("[MERCADOPAGO] parse_raw() fue llamado; use parse(file_path) en su lugar")
+        return pd.DataFrame()
 
 
 # ════════════════════════════════════════════════════════════
@@ -778,6 +845,30 @@ class BankParser:
                     logger.info("[NETPAY] Filas parseadas: %d", len(result))
                     return result
 
+                # MERCADO PAGO: Lee colores de Excel directamente
+                # Detectar por presencia de columna "Total a recibir" o "Número de operación"
+                try:
+                    _primary_sheet = xl.worksheets[0]
+                    _header_row_idx = 3  # Fila 4 (0-indexed)
+                    if _header_row_idx < len(_primary_sheet._cells):
+                        _hdr_text = " ".join(
+                            str(cell.value or "").upper()
+                            for cell in list(_primary_sheet.iter_rows(
+                                min_row=_header_row_idx + 1,
+                                max_row=_header_row_idx + 1,
+                                values_only=False
+                            ))[:10]
+                        )
+                        if ("NUMERO DE OPERACION" in _hdr_text or "NÚMERO DE OPERACIÓN" in _hdr_text or
+                            "TARJETA PRESENTE" in _hdr_text or "COBRO" in _hdr_text):
+                            logger.info("Formato bancario detectado: MERCADO PAGO (por xlsx)")
+                            result = _MercadoPagoParser().parse(file_path)
+                            logger.info("[MERCADOPAGO] Filas parseadas: %d", len(result))
+                            return result
+                except Exception as e:
+                    logger.debug("[MERCADOPAGO detection] Excepción (no es MP): %s", str(e))
+                    pass
+
             except Exception:
                 pass  # no es REPORTE, continuar con detección normal
 
@@ -791,7 +882,13 @@ class BankParser:
             )
 
         logger.info("Formato bancario detectado: %s", fmt.BANK_NAME)
-        result = fmt().parse_raw(raw)
+        
+        # Mercado Pago requiere acceso a openpyxl para colores, no usa parse_raw()
+        if fmt == _MercadoPagoParser:
+            result = _MercadoPagoParser().parse(file_path)
+        else:
+            result = fmt().parse_raw(raw)
+        
         logger.info("[%s] Filas parseadas: %d", fmt.BANK_NAME, len(result))
         return result
 
