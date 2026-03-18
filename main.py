@@ -64,12 +64,21 @@ def _enrich_bank_with_reporte(bank_df, reporte_df):
         suffixes=("", "_rep"),
     )
 
+    # Contar matches para logging
+    matches = merged[merged["tienda"].notna() | merged.get("tienda_rep", _pd.Series()).notna()].shape[0]
+    logger.debug(f"[ENRICH] Matches encontrados: {matches}/{len(merged)}")
+
     # Si bank_df ya tenía tienda (p. ej. también es REPORTE), preferir la existente
-    for col in ("tienda", "tipo_banco"):
-        if col in bank.columns:
-            merged[col] = merged[col].combine_first(merged.get(f"{col}_rep", _pd.Series()))
-        elif f"{col}_rep" in merged.columns:
-            merged = merged.rename(columns={f"{col}_rep": col})
+    # Si NO tenía tienda, usar la del reporte si existe
+    if "tienda" not in bank.columns and "tienda_rep" in merged.columns:
+        merged["tienda"] = merged["tienda_rep"]
+    elif "tienda" in merged.columns and "tienda_rep" in merged.columns:
+        merged["tienda"] = merged["tienda"].fillna(merged["tienda_rep"])
+        
+    if "tipo_banco" not in bank.columns and "tipo_banco_rep" in merged.columns:
+        merged["tipo_banco"] = merged["tipo_banco_rep"]
+    elif "tipo_banco" in merged.columns and "tipo_banco_rep" in merged.columns:
+        merged["tipo_banco"] = merged["tipo_banco"].fillna(merged["tipo_banco_rep"])
 
     # Limpiar columnas auxiliares
     drop_cols = ["_amt_key", "_date_key"] + [c for c in merged.columns if c.endswith("_rep")]
@@ -122,8 +131,8 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     )
 
     # ── Enriquecimiento de REPORTE_CAJA para la cuenta 6614 ──────────────────────────────
-    # 1. Solo se enriquecen movimientos de la 6614 con datos del REPORTE_CAJA
-    # 2. Movimientos en REPORTE_CAJA (6614) sin match en banco también se incluyen
+    # Solo enriquece: agrega tienda + tipo_pago al banco
+    # No agrega registros sin match
     if reporte_caja_dfs:
         logger.info("[ENRIQUECIMIENTO] %d archivo(s) REPORTE_CAJA disponible(s)", len(reporte_caja_dfs))
         
@@ -137,64 +146,12 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         if not reporte_6614.empty:
             logger.info("[ENRIQUECIMIENTO] Movimientos 6614 en REPORTE_CAJA: %d", len(reporte_6614))
             
-            # Preparar para merge
-            bank_df["_amt_key_bank"]  = bank_df["abs_amount"].round(2)
-            bank_df["_date_key_bank"] = bank_df["movement_date"].dt.date
-            
-            reporte_6614["_amt_key_rep"]  = reporte_6614["abs_amount"].round(2)
-            reporte_6614["_date_key_rep"] = reporte_6614["movement_date"].dt.date
-            
-            # Merge: enriquecer banco con reporte
-            bank_enriched = bank_df.merge(
-                reporte_6614[["_date_key_rep", "_amt_key_rep", "tienda", "tipo_banco"]],
-                left_on=["_date_key_bank", "_amt_key_bank"],
-                right_on=["_date_key_rep", "_amt_key_rep"],
-                how="left",
-                suffixes=("", "_rep"),
-            )
-            
-            # Transferir tienda y tipo_banco del enriquecimiento
-            for col in ("tienda", "tipo_banco"):
-                if f"{col}_rep" in bank_enriched.columns:
-                    if col in bank_enriched.columns:
-                        # Si ya tiene tienda, preferir la existente
-                        bank_enriched[col] = bank_enriched[col].fillna(bank_enriched[f"{col}_rep"])
-                    else:
-                        bank_enriched[col] = bank_enriched[f"{col}_rep"]
-            
-            # Limpiar columnas auxiliares
-            drop_cols = [c for c in bank_enriched.columns if c.startswith("_")]
-            bank_enriched = bank_enriched.drop(columns=drop_cols)
-            
-            # ── IMPORTANTE: Agregar movimientos del REPORTE_CAJA sin match en banco ──────────
-            # Identificar qué movimientos del reporte NO tienen match en banco
-            matched_indices = bank_enriched.index.tolist() if not bank_enriched.empty else []
-            
-            # Crear set de (date, amount) que ya enriquecieron
-            matched_keys = set()
-            for idx, row in bank_df.iterrows():
-                date_key = row["movement_date"].date() if hasattr(row["movement_date"], 'date') else row["movement_date"]
-                amt_key = round(row["abs_amount"], 2)
-                matched_keys.add((date_key, amt_key))
-            
-            # Registros del reporte sin match
-            unmatched_reporte = []
-            for _, row in reporte_6614.iterrows():
-                date_key = row["movement_date"].date() if hasattr(row["movement_date"], 'date') else row["movement_date"]
-                amt_key = round(row["abs_amount"], 2)
-                if (date_key, amt_key) not in matched_keys:
-                    unmatched_reporte.append(row)
-            
-            if unmatched_reporte:
-                unmatched_df = _pd.DataFrame(unmatched_reporte)
-                logger.info("[ENRIQUECIMIENTO] Movimientos 6614 en REPORTE sin match en banco: %d", len(unmatched_df))
-                bank_enriched = _pd.concat([bank_enriched, unmatched_df], ignore_index=True)
-            
-            bank_df = bank_enriched
+            # Enriquecer banco con reporte (agregar tienda + tipo_pago)
+            bank_df = _enrich_bank_with_reporte(bank_df, reporte_6614)
             
             logger.info(
-                "[ENRIQUECIMIENTO] Total banco después enriquecimiento: %d movimientos",
-                len(bank_df),
+                "[ENRIQUECIMIENTO] Banco enriquecido: %d movimientos con tienda",
+                bank_df["tienda"].notna().sum() if "tienda" in bank_df.columns else 0,
             )
         else:
             logger.info("[ENRIQUECIMIENTO] No hay movimientos 6614 en REPORTE_CAJA para enriquecer")
