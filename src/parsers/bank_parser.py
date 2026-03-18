@@ -496,7 +496,8 @@ class _MercadoPagoParser(_BaseBankParser):
                     continue
                 
                 # Obtener datos de la fila desde pandas
-                pandas_row_idx = excel_row_idx - self._HEADER_ROW - 2
+                # Conversión: Excel usa 1-indexed, pandas usa 0-indexed
+                pandas_row_idx = excel_row_idx - 1
                 if pandas_row_idx >= len(raw):
                     break
                 
