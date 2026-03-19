@@ -7,6 +7,7 @@ Ejecución:
 
 import io
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -510,10 +511,11 @@ if _dl_cols:
                 with st.expander("🔬 Debug interno write_back", expanded=True):
                     st.write(_wb_debug)
                 with _dl_buttons[_btn_idx]:
+                    fecha_hoy = datetime.now().strftime("%d-%m-%Y")
                     st.download_button(
                         label="⬇ Descargar Papel de Trabajo actualizado",
                         data=_pt_bytes,
-                        file_name="papel_de_trabajo_actualizado.xlsx",
+                        file_name=f"PAPEL DE TRABAJO TRAJETAS {fecha_hoy}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
             except Exception as _pt_err:
