@@ -3,10 +3,10 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.0 |
-| Fecha | 03/03/2026 |
+| Versión | 1.1 |
+| Fecha | 19/03/2026 |
 | Autor | Diego Escobedo |
-| Estado | Borrador |
+| Estado | Vigente |
 
 ---
 
@@ -86,8 +86,14 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 **Criterios de aceptación:**
 - Acepta `.csv` y `.xlsx` / `.xls`.
 - Detecta automáticamente el banco por la estructura del archivo.
+- **Robustez de parseo**: El parser BBVA y Banorte normalizan nombres de columnas para manejar variaciones en:
+  - Acentos (e.g., "DEPÓSITOS" vs "DEPOSITOS")
+  - Espacios extra
+  - Variaciones en capitalización
+  - Esta flexibilidad previene errores por diferencias de formato en archivos exportados desde distintos sistemas
 - Si se carga un REPORTE CAJA junto con el estado de cuenta, lo usa para enriquecer los movimientos bancarios con los campos `tienda` y `tipo_banco`.
 - Si solo se carga un REPORTE CAJA (sin estado de cuenta), lo usa como fuente bancaria.
+- Si los nombres de columnas requeridas no se encuentran (incluso después de normalización), el parser lanza un error descriptivo indicando las columnas disponibles.
 
 ---
 

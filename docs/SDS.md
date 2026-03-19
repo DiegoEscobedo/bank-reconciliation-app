@@ -3,10 +3,10 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.0 |
-| Fecha | 03/03/2026 |
+| Versión | 1.1 |
+| Fecha | 19/03/2026 |
 | Autor | Diego Escobedo |
-| Estado | Borrador |
+| Estado | Vigente |
 
 ---
 
@@ -109,7 +109,7 @@ Centraliza todos los parámetros configurables del sistema. No contiene lógica.
 BankParser
     └── detecta el banco y delega a sub-parser
 _BaseBankParser
-    ├── _BBVAParser     → detecta columnas DEPÓSITOS / RETIROS
+    ├── _BBVAParser     → detecta columnas DEPÓSITOS / RETIROS (normalizadas)
     ├── _BanorteParser  → detecta encabezado en fila 1 con número de cuenta en fila 0
     └── _ReporteCajaParser → detecta hoja/formato de reporte de punto de venta
 ```
@@ -119,6 +119,30 @@ _BaseBankParser
 2. Itera sobre `_PARSERS` probando si cada sub-parser reconoce el formato.
 3. Delega el parseo al primero que coincida.
 4. Añade columna `bank` con el nombre del banco para identificar REPORTE CAJA.
+
+**Normalización robusta de nombres de columnas (v1.1+):**
+
+Los sub-parsers `_BBVAParser` y `_BanorteParser` implementan normalización de nombres para mejorar compatibilidad con archivos de diferentes fuentes:
+
+- **Proceso de normalización:**
+  1. Lee el header y normaliza cada nombre usando `unicodedata.NFD`
+  2. Elimina diacríticos (acentos: É→E, Ó→O)
+  3. Convierte a mayúsculas
+  4. Compara contra los nombres esperados normalizados
+  
+- **Ejemplos de variaciones soportadas:**
+  - `DEPÓSITOS` → normaliza a `DEPOSITOS` ✓
+  - `FECHA DE OPERACIÓN` → `FECHA DE OPERACION` ✓
+  - `Fecha de Operación` → `FECHA DE OPERACION` ✓
+  
+- **Validación:**
+  - Si una columna requerida no se encuentra (incluso después de normalización), lanza `ValueError` con lista de columnas disponibles
+  - Los mensajes de error son descriptivos para ayudar al usuario
+
+Esta flexibilidad resuelve problemas de incompatibilidad causados por:
+- Exportaciones de diferentes versiones de Excel/LibreOffice
+- Diferencias de encoding o locale
+- Variaciones manuales en nombres de columnas
 
 ---
 
