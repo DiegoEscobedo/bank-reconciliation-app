@@ -527,16 +527,17 @@ if _dl_cols:
 
 # ── Métricas ─────────────────────────────────────────────────
 st.markdown("### Resumen")
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 
 c1.metric("Movimientos Banco",  summary["total_bank_movements"])
 c2.metric("Movimientos JDE",    summary["total_jde_movements"])
 c3.metric("Matches exactos",    summary["exact_matches_count"])
 c4.metric("Matches agrupados",  summary["grouped_matches_count"])
-c5.metric("Pendientes Banco",   summary["pending_bank_count"],
+c5.metric("Agrupados inv.",     summary.get("reverse_grouped_matches_count", 0))
+c6.metric("Pendientes Banco",   summary["pending_bank_count"],
           delta=f"-{summary['pending_bank_count']}" if summary["pending_bank_count"] else None,
           delta_color="inverse")
-c6.metric("Pendientes JDE",     summary["pending_jde_count"],
+c7.metric("Pendientes JDE",     summary["pending_jde_count"],
           delta=f"-{summary['pending_jde_count']}" if summary["pending_jde_count"] else None,
           delta_color="inverse")
 
@@ -564,7 +565,7 @@ st.markdown("---")
 # ════════════════════════════════════════════════════════════
 
 tab_conciliados, tab_pend_bank, tab_pend_jde, tab_historicos = st.tabs([
-    f"✅ Conciliados ({summary['exact_matches_count'] + summary['grouped_matches_count']})",
+    f"✅ Conciliados ({summary['exact_matches_count'] + summary['grouped_matches_count'] + summary.get('reverse_grouped_matches_count', 0)})",
     f"🔴 Pendientes Banco ({summary['pending_bank_count']})",
     f"🔴 Pendientes JDE ({summary['pending_jde_count']})",
     "📋 Análisis Históricos",

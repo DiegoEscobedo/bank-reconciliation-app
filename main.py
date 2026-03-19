@@ -331,6 +331,7 @@ def _print_summary(summary: dict, report_path) -> None:
     print(f"  Movimientos JDE           : {summary['total_jde_movements']}")
     print(f"  Matches exactos           : {summary['exact_matches_count']}")
     print(f"  Matches agrupados         : {summary['grouped_matches_count']}")
+    print(f"  Agrupados inversos        : {summary.get('reverse_grouped_matches_count', 0)}")
     print(f"  Pendientes banco          : {summary['pending_bank_count']}")
     print(f"  Pendientes JDE            : {summary['pending_jde_count']}")
     print(f"  Reporte guardado en       : {report_path}")

@@ -80,6 +80,7 @@ class ExcelReporter:
             ("Movimientos JDE",          summary["total_jde_movements"]),
             ("Matches exactos",          summary["exact_matches_count"]),
             ("Matches agrupados",        summary["grouped_matches_count"]),
+            ("Agrupados inversos",       summary.get("reverse_grouped_matches_count", 0)),
             ("Pendientes banco",         summary["pending_bank_count"]),
             ("Pendientes JDE",           summary["pending_jde_count"]),
         ]
