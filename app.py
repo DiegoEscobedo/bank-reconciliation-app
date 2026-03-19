@@ -440,18 +440,19 @@ summary = results["summary"]
 # ── Título y descargas ──────────────────────────────────────────
 st.title("Resultados de Conciliación")
 
-# DEBUG TEMPORAL — siempre visible
-with st.expander("🔍 Debug write-back", expanded=False):
-    _dbg_jde = results.get("conciliated_jde_movements", pd.DataFrame())
-    st.write({
-        "is_papel_trabajo": results.get("_is_papel_trabajo"),
-        "tiene_jde_bytes":  bool(results.get("_jde_bytes")),
-        "tiene_jde_path":   bool(results.get("_jde_source_path")),
-        "cols_conciliados_jde": list(_dbg_jde.columns) if not _dbg_jde.empty else [],
-        "filas_conciliados_jde": len(_dbg_jde),
-        "tiene_aux_fact_col": "_aux_fact" in _dbg_jde.columns,
-        "aux_facts_muestra": list(_dbg_jde["_aux_fact"].dropna().unique()[:5]) if "_aux_fact" in _dbg_jde.columns else [],
-    })
+# DEBUG OPCIONAL (comentado por defecto)
+# Descomenta para ver detalles internos del write-back
+# with st.expander("🔍 Debug write-back", expanded=False):
+#     _dbg_jde = results.get("conciliated_jde_movements", pd.DataFrame())
+#     st.write({
+#         "is_papel_trabajo": results.get("_is_papel_trabajo"),
+#         "tiene_jde_bytes":  bool(results.get("_jde_bytes")),
+#         "tiene_jde_path":   bool(results.get("_jde_source_path")),
+#         "cols_conciliados_jde": list(_dbg_jde.columns) if not _dbg_jde.empty else [],
+#         "filas_conciliados_jde": len(_dbg_jde),
+#         "tiene_aux_fact_col": "_aux_fact" in _dbg_jde.columns,
+#         "aux_facts_muestra": list(_dbg_jde["_aux_fact"].dropna().unique()[:5]) if "_aux_fact" in _dbg_jde.columns else [],
+#     })
 
 _dl_cols = []
 if results.get("_excel_bytes"):
@@ -492,12 +493,12 @@ if _dl_cols:
         else:
             _aux_facts = []
 
-        # DEBUG TEMPORAL — muestra qué aux_facts se encontraron
-        st.caption(
-            f"🔍 DEBUG write-back: is_papel={results.get('_is_papel_trabajo')} | "
-            f"tiene_bytes={bool(results.get('_jde_bytes'))} | "
-            f"aux_facts ({len(_aux_facts)}): {_aux_facts[:5]}"
-        )
+        # DEBUG OPCIONAL (comentado por defecto) — muestra qué aux_facts se encontraron
+        # st.caption(
+        #     f"🔍 DEBUG write-back: is_papel={results.get('_is_papel_trabajo')} | "
+        #     f"tiene_bytes={bool(results.get('_jde_bytes'))} | "
+        #     f"aux_facts ({len(_aux_facts)}): {_aux_facts[:5]}"
+        # )
 
         # Usar bytes guardados (el TemporaryDirectory ya fue destruido)
         _pt_source = results.get("_jde_bytes") or results.get("_jde_source_path", "")
@@ -508,8 +509,9 @@ if _dl_cols:
                 _pt_bytes = _reporter.write_back_conciliados(
                     _pt_source, _aux_facts, debug_info=_wb_debug
                 )
-                with st.expander("🔬 Debug interno write_back", expanded=True):
-                    st.write(_wb_debug)
+                # DEBUG OPCIONAL (comentado por defecto) — muestra detalles del write-back
+                # with st.expander("🔬 Debug interno write_back", expanded=True):
+                #     st.write(_wb_debug)
                 with _dl_buttons[_btn_idx]:
                     fecha_hoy = datetime.now().strftime("%d-%m-%Y")
                     st.download_button(
@@ -521,7 +523,8 @@ if _dl_cols:
             except Exception as _pt_err:
                 import traceback
                 st.warning(f"No se pudo generar el Papel de Trabajo actualizado: {_pt_err}")
-                st.code(traceback.format_exc())
+                # DEBUG OPCIONAL (comentado por defecto) — muestra traceback en caso de error
+                # st.code(traceback.format_exc())
         elif results.get("_is_papel_trabajo"):
             st.info("No se encontraron Aux_Facts para marcar en el Papel de Trabajo.")
 
