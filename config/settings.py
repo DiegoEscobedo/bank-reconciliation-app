@@ -3,6 +3,11 @@ DATE_TOLERANCE_DAYS = 2       # cubre viernes → lunes y fines de semana largos
 MAX_GROUP_SIZE = 10           # más entradas por grupo (el filtro por tienda reduce candidatos)
 ROUND_DECIMALS = 2
 
+# ── Cuentas que usan "Papel de Trabajo" Excel + write-back ─────────────────
+# Para estas cuentas: se espera un archivo Excel del Papel de Trabajo, y se actualiza al final
+# Para otras cuentas: se aceptan archivos CSV normales del JDE, sin write-back
+PAPEL_TRABAJO_ACCOUNTS = {"6614", "7133"}
+
 # ── Mapeo nombre completo de tienda → abreviatura JDE ───────────────────────
 # Usado por bank_parser (_ReporteCajaParser) y jde_parser (PapelTrabajoParser)
 TIENDA_ABBREV: dict[str, str] = {

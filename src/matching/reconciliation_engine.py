@@ -215,6 +215,7 @@ class ReconciliationEngine:
             "_jde_source_path":           interactive_result.get("_jde_source_path"),
             "_jde_bytes":                 interactive_result.get("_jde_bytes"),
             "_is_papel_trabajo":          interactive_result.get("_is_papel_trabajo", False),
+            "_bank_accounts":             interactive_result.get("_bank_accounts", []),
         }
 
     # ============================================================
@@ -775,6 +776,45 @@ class ReconciliationEngine:
     # COLOR-BASED MATCHING (Mercado Pago)
     # ============================================================
 
+    def _is_gray_color(self, hex_color: str) -> bool:
+        """
+        Detecta si un color hex es gris (cuando R=G=B, es un gris).
+        
+        Formatos aceptados:
+        - "FF808080" (ARGB con alpha)
+        - "#808080" (RGB con #)
+        - "808080" (RGB sin #)
+        
+        Retorna True si es gris (incluyendo blanco y negro).
+        """
+        if not hex_color:
+            return True
+        
+        hex_color = str(hex_color).strip().upper()
+        
+        # Remover '#' si existe
+        if hex_color.startswith("#"):
+            hex_color = hex_color[1:]
+        
+        # Si tiene 8 caracteres (ARGB), tomar solo los últimos 6 (RGB)
+        if len(hex_color) == 8:
+            hex_color = hex_color[2:]
+        
+        # Validar que sea válido hex de 6 caracteres
+        if len(hex_color) != 6:
+            return False
+        
+        try:
+            # Extraer componentes R, G, B
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            
+            # Es gris si R = G = B
+            return r == g == b
+        except ValueError:
+            return False
+
     def _propose_color_based_matches(self, bank_dataframe, jde_dataframe):
         """
         Para Mercado Pago: agrupa filas por color de celda ("cell_color"),
@@ -782,6 +822,7 @@ class ReconciliationEngine:
         movimientos bancarios.
         
         Filtro adicional: Solo procesa filas con Estado="Aprobado"
+        Excluye: colores grises (gris, blanco, negro)
         
         Retorna lista de propuestas de tipo "color" con:
         - color: hex color string
@@ -800,25 +841,33 @@ class ReconciliationEngine:
         jde_df = jde_dataframe.copy()
         jde_df["cell_color"] = jde_df["cell_color"].fillna("")
         
-        # Colores a ignorar (blanco, gris claro, vacío)
-        ignored_colors = {"", "FFFFFFFF", "FFC0C0C0", "FFC0C0C0C0"}
+        # Colores a ignorar (vacío)
+        ignored_colors = {"", "FFFFFFFF"}  # Blanco puro
         color_groups = {}
         
         for idx, row in jde_df.iterrows():
             color = str(row.get("cell_color", "")).strip().upper()
-            if color not in ignored_colors:
-                # Filtro: solo procesar si Estado contiene "Aprobado"
-                raw_status = str(row.get("raw_status", "")).strip().lower()
-                if "aprobado" not in raw_status:
-                    logger.debug(
-                        "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s Estado='%s' - IGNORADA (no Aprobado)",
-                        idx, color, raw_status
-                    )
-                    continue  # Saltar esta fila
-                
-                if color not in color_groups:
-                    color_groups[color] = []
-                color_groups[color].append((idx, row))
+            
+            # Ignorar si está en lista de excluidos O si es color gris
+            if color in ignored_colors or self._is_gray_color(color):
+                logger.debug(
+                    "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s - IGNORADA (gris o vacío)",
+                    idx, color
+                )
+                continue
+            
+            # Filtro: solo procesar si Estado contiene "Aprobado"
+            raw_status = str(row.get("raw_status", "")).strip().lower()
+            if "aprobado" not in raw_status:
+                logger.debug(
+                    "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s Estado='%s' - IGNORADA (no Aprobado)",
+                    idx, color, raw_status
+                )
+                continue  # Saltar esta fila
+            
+            if color not in color_groups:
+                color_groups[color] = []
+            color_groups[color].append((idx, row))
         
         # Por cada grupo de color, buscar matching
         group_id = 1000  # Usar IDs altos para no colisionar con otros matching types
@@ -891,15 +940,22 @@ class ReconciliationEngine:
     # ============================================================
 
     def _find_subset_sum_with_limit(self, candidate_rows, target_amount):
-
-        # Ordenar descendente: los montos más grandes primero → poda más rápida
+        """
+        Encuentra un subconjunto de candidate_rows cuya suma sea lo más
+        cercano posible al target_amount (dentro de tolerancia).
+        
+        Estrategia: busca la solución MEJOR (más montos incluidos, menor
+        diferencia) en lugar de retornar la PRIMERA solución encontrada.
+        Esto evita casos donde se ignoran centavos pequeños innecesariamente.
+        """
+        # Ordenar ascendente: los montos más pequeños primero → maximiza inclusión
         sorted_candidates = sorted(
             candidate_rows,
             key=lambda row: round(
                 row[1]["abs_amount"],
                 self.rounding_decimals
             ),
-            reverse=True,
+            reverse=False,  # ← MENOR a MAYOR (para preferir incluir más montos)
         )
 
         # Suma de sufijos para poda adicional
@@ -908,26 +964,34 @@ class ReconciliationEngine:
         for i in range(len(amounts) - 1, -1, -1):
             suffix_sums[i] = suffix_sums[i + 1] + amounts[i]
 
+        best_result = None
+        best_diff = float('inf')
+
         def backtracking_search(
                 start_position,
                 current_combination,
                 current_sum):
+            nonlocal best_result, best_diff
 
             if len(current_combination) > self.maximum_group_size:
-                return None
+                return
 
-            if self._is_amount_within_tolerance(
-                    current_sum,
-                    target_amount):
-                return current_combination
+            current_diff = abs(round(current_sum - target_amount, self.rounding_decimals))
+
+            # Si esta solución es mejor (menor diferencia, o misma diferencia pero más montos)
+            if current_diff <= self.amount_tolerance:
+                if (current_diff < best_diff or 
+                    (current_diff == best_diff and len(current_combination) > len(best_result or []))):
+                    best_diff = current_diff
+                    best_result = current_combination
 
             if current_sum > target_amount + self.amount_tolerance:
-                return None
+                return
 
             # Poda: ni sumando todo lo que queda podemos alcanzar el target
             remaining = target_amount - current_sum
             if suffix_sums[start_position] < remaining - self.amount_tolerance:
-                return None
+                return
 
             for index in range(start_position, len(sorted_candidates)):
 
@@ -938,19 +1002,15 @@ class ReconciliationEngine:
                     self.rounding_decimals
                 )
 
-                result = backtracking_search(
+                backtracking_search(
                     index + 1,
                     current_combination + [(jde_index, jde_row)],
                     round(current_sum + movement_amount,
                           self.rounding_decimals)
                 )
 
-                if result:
-                    return result
-
-            return None
-
-        return backtracking_search(0, [], 0)
+        backtracking_search(0, [], 0)
+        return best_result
 
     # ============================================================
     # FUNCIONES AUXILIARES

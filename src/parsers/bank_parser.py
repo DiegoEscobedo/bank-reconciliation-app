@@ -71,15 +71,17 @@ class _BaseBankParser:
 
 class _BBVAParser(_BaseBankParser):
     """
-    Formato BBVA:
+    Formato Banorte (exportado como estructura BBVA-like):
         Fila 0 (header): CUENTA | FECHA DE OPERACIÓN | FECHA | REFERENCIA |
                          DESCRIPCIÓN | COD. TRANSAC | SUCURSAL |
                          DEPÓSITOS | RETIROS | SALDO | MOVIMIENTO |
                          DESCRIPCIÓN DETALLADA | CHEQUE
         Filas 1..n: datos
+        
+    Usado por: Banorte (cuentas como 3478, 6614, etc.)
     """
 
-    BANK_NAME = "BBVA"
+    BANK_NAME = "BANORTE"
 
     _COL_CUENTA    = "CUENTA"
     _COL_FECHA     = "FECHA DE OPERACIÓN"
@@ -170,14 +172,16 @@ class _BBVAParser(_BaseBankParser):
 
 class _BanorteParser(_BaseBankParser):
     """
-    Formato Banorte:
+    Formato BBVA (estructura alternativa):
         Fila 0: Cuenta | <número de cuenta> | ...
         Fila 1 (header): Fecha Operación | Concepto | Referencia |
                          Referencia Ampliada | Cargo | Abono | Saldo
         Filas 2..n: datos
+        
+    Nota: Esta estructura no se está usando actualmente.
     """
 
-    BANK_NAME = "BANORTE"
+    BANK_NAME = "BBVA"
 
     _COL_FECHA    = "Fecha Operación"
     _COL_CONCEPTO = "Concepto"
@@ -483,15 +487,38 @@ class _MercadoPagoParser(_BaseBankParser):
         return fallback
 
     def _is_color_ignored(self, fill: PatternFill) -> bool:
-        """Devuelve True si el color debe ignorarse (blanco o gris claro)."""
+        """
+        Devuelve True si el color debe ignorarse (blanco, gris, o sin color).
+        Gris = R=G=B (incluyendo negro #000000 y blanco #FFFFFF).
+        """
         if not fill or not fill.fgColor:
             return True
         color = fill.fgColor.rgb
         if not color:
             return True
-        # Colores a ignorar: blanco (FFFFFFFF), gris claro (FFFFC0C0C0), y variantes
-        ignored = {"FFFFFFFF", "00000000", "FFFFC0C0C0", "FFC0C0C0"}
-        return str(color).upper() in ignored or str(color) == "00000000"
+        
+        color_str = str(color).upper()
+        
+        # Colores completamente ignorados (blanco y variantes)
+        ignored = {"FFFFFFFF", "00000000"}
+        if color_str in ignored:
+            return True
+        
+        # Detectar grises: R=G=B en formato AARRGGBB (ARGB)
+        # Formato: "FFNNNNNN" → AA=FF, RR=NN, GG=NN, BB=NN
+        if len(color_str) >= 8:
+            try:
+                # Extraer RGB (ignorar alpha)
+                r = color_str[2:4]
+                g = color_str[4:6]
+                b = color_str[6:8]
+                # Si R=G=B es gris (incluyendo blanco y negro)
+                if r == g == b:
+                    return True  # Gris detectado, ignorar
+            except (IndexError, ValueError):
+                pass
+        
+        return False
 
     def _normalize_amount(self, amount_str: str) -> str:
         """Normaliza monto: remueve $, convierte coma a punto, etc."""
@@ -883,6 +910,119 @@ class _ReporteCajaParser(_BaseBankParser):
 
 
 # ════════════════════════════════════════════════════════════
+# HSBC
+# ════════════════════════════════════════════════════════════
+
+class _HSBCParser(_BaseBankParser):
+    """
+    Formato HSBC:
+        Fila 0 (header):
+            Col 1: Nombre de cuenta
+            Col 2: Número de cuenta
+            Col 3: Nombre del banco (HSBC Mexico)
+            ...
+            Col 19: Descripción
+            Col 22: Fecha valor
+            Col 23: Importe de crédito
+            Col 24: Importe del débito
+        Filas 1..n: datos
+    
+    Estructura simple: headers en row 0, datos a partir de row 1.
+    """
+
+    BANK_NAME = "HSBC"
+
+    _COL_CUENTA = 1      # 0-indexed: Col 2
+    _COL_DESC = 18       # 0-indexed: Col 19
+    _COL_FECHA = 21      # 0-indexed: Col 22
+    _COL_CREDITO = 22    # 0-indexed: Col 23 (depósito)
+    _COL_DEBITO = 23     # 0-indexed: Col 24 (retiro)
+
+    def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
+        # Las columnas ya están numeradas (0-indexed) desde el read_file
+        # Fila 0 es header, filas 1+ son datos
+        if len(raw) < 2:
+            logger.warning("[HSBC] Archivo vacío o sin datos")
+            return pd.DataFrame(columns=[
+                "account_id", "bank", "raw_date",
+                "description", "description_detail",
+                "raw_deposit", "raw_withdrawal"
+            ])
+
+        # Extraer headers
+        headers = [str(c).strip() for c in raw.iloc[0]]
+        
+        # Datos desde la fila 1
+        df = raw.iloc[1:].copy()
+        df.columns = headers
+        df = df.reset_index(drop=True)
+
+        # Extraer número de cuenta de la primera fila (row 1, col 2 = index 1)
+        account_id = ""
+        try:
+            account_id = str(raw.iloc[1, self._COL_CUENTA]).strip()
+            if account_id.lower() in ("", "nan", "none"):
+                account_id = "UNKNOWN"
+        except Exception:
+            account_id = "UNKNOWN"
+
+        logger.info("[HSBC] Cuenta detectada: %s", account_id)
+
+        # Filtrar filas: columna 22 (fecha) debe tener valor
+        col_fecha_name = headers[self._COL_FECHA] if self._COL_FECHA < len(headers) else "Fecha"
+        col_desc_name = headers[self._COL_DESC] if self._COL_DESC < len(headers) else "Descripción"
+        col_credito_name = headers[self._COL_CREDITO] if self._COL_CREDITO < len(headers) else "Crédito"
+        col_debito_name = headers[self._COL_DEBITO] if self._COL_DEBITO < len(headers) else "Débito"
+
+        # Validar que tenemos columnas mínimas
+        if col_fecha_name not in df.columns:
+            available = df.columns.tolist()
+            logger.error(f"[HSBC] No se encontró columna de fecha. Disponibles: {available}")
+            raise ValueError(f"[HSBC] Estructura no reconocida. Esperado header en fila 0.")
+
+        # Filtrar filas con fecha válida
+        df = df[df[col_fecha_name].astype(str).apply(looks_like_date)].copy()
+
+        # Renombrar columnas para output
+        df_out = pd.DataFrame()
+        df_out["account_id"] = account_id
+        df_out["bank"] = self.BANK_NAME
+        df_out["raw_date"] = df[col_fecha_name].astype(str)
+        df_out["description"] = df[col_desc_name].astype(str)
+        df_out["description_detail"] = df[col_desc_name].astype(str)
+
+        # Crédito (depósito) y Débito (retiro)
+        df_out["raw_deposit"] = ""
+        df_out["raw_withdrawal"] = ""
+
+        for idx, row in df.iterrows():
+            try:
+                credito = str(row[col_credito_name]).strip() if col_credito_name in row.index else ""
+                debito = str(row[col_debito_name]).strip() if col_debito_name in row.index else ""
+                
+                # Si hay crédito, es depósito
+                if credito and credito.lower() not in ("", "nan", "none"):
+                    df_out.at[idx, "raw_deposit"] = credito
+                # Si hay débito, es retiro (puede ser negativo)
+                if debito and debito.lower() not in ("", "nan", "none"):
+                    df_out.at[idx, "raw_withdrawal"] = debito
+            except Exception:
+                pass
+
+        logger.info("[HSBC] Filas parseadas: %d", len(df_out))
+        return df_out.reset_index(drop=True)
+
+    @staticmethod
+    def _extract_account(raw: pd.DataFrame) -> str:
+        # Fila 1 (row 1), columna 2 (col 1)
+        try:
+            val = str(raw.iloc[1, 1]).strip()
+            return val if val.lower() not in ("", "nan", "none") else "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
+
+
+# ════════════════════════════════════════════════════════════
 # PARSER PRINCIPAL (auto-detección)
 # ════════════════════════════════════════════════════════════
 
@@ -904,6 +1044,7 @@ class BankParser:
         _ScotiabankParser,
         _NetPayParser,
         _MercadoPagoParser,
+        _HSBCParser,
     ]
 
     def parse(self, file_path: str) -> pd.DataFrame:
@@ -1060,5 +1201,12 @@ class BankParser:
             return _MercadoPagoParser
         if len(raw) > 3 and "operaci" in str(raw.iloc[3, 0]).lower():
             return _MercadoPagoParser
+
+        # HSBC: fila 0 tiene "Número de cuenta" y alguna columna contiene "HSBC Mexico"
+        # o tiene las columnas: "Nombre de cuenta", "Número de cuenta", "Fecha valor", etc.
+        if ("NUMERO DE CUENTA" in row0_upper or "Número de cuenta" in row0) and (
+            "HSBC" in row0_upper or "FECHA VALOR" in row0_upper or "IMPORTE DE CREDITO" in row0_upper
+        ):
+            return _HSBCParser
 
         return None

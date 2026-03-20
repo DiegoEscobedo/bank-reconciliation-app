@@ -62,10 +62,13 @@ with st.sidebar:
 
     st.subheader("1. Archivo JDE")
     jde_file = st.file_uploader(
-        "Sube el reporte Auxiliar (R550911A1)",
+        "Sube el reporte transaccional",
         type=["csv", "xlsx", "xls"],
         key="jde",
-        help="Reporte Auxiliar de Contabilidad exportado del JDE (CSV o Excel)"
+        help=(
+            "**Cuentas 6614 y 7133 (BBVA):** Sube el Papel de Trabajo (.xlsx)\n\n"
+            "**Otras cuentas (3478 Banorte, etc.):** Sube el Reporte Auxiliar de Contabilidad (.csv) del JDE"
+        )
     )
 
     st.markdown("---")
@@ -459,6 +462,21 @@ if results.get("_excel_bytes"):
     _dl_cols.append("conciliacion")
 if results.get("_is_papel_trabajo"):
     _dl_cols.append("papel_trabajo")
+
+# Mostrar tipo de conciliación realizada
+if results.get("_is_papel_trabajo"):
+    st.success(
+        f"✅ **Conciliación Papel de Trabajo** — Cuenta(s): {', '.join(results.get('_bank_accounts', []))}\n\n"
+        "Se generó el resumen de conciliación y puede actualizar el Papel de Trabajo."
+    )
+else:
+    _accounts_str = ', '.join(results.get('_bank_accounts', ['Desconocida']))
+    st.info(
+        f"✓ **Conciliación completada** — Cuenta(s): {_accounts_str}\n\n"
+        "Se generó el resumen de conciliación. Los registros JDE cargados no se modifican."
+    )
+
+st.markdown("---")
 
 if _dl_cols:
     _n = len(_dl_cols)

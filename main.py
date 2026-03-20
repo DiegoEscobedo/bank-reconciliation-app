@@ -22,8 +22,37 @@ from src.validacion.schema_validator import DataFrameSchemaValidator, SchemaVali
 from src.matching.reconciliation_engine import ReconciliationEngine
 from src.reporting.excel_reporter import ExcelReporter
 from src.utils.logger import get_logger
+from config.settings import PAPEL_TRABAJO_ACCOUNTS as _PAPEL_TRABAJO_ACCOUNTS
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# HELPER: Determinar si usar Papel de Trabajo
+# ============================================================
+
+def _is_papel_trabajo_account(bank_accounts: set, jde_file_path: str) -> bool:
+    """
+    Determina si se debe usar la modalidad "Papel de Trabajo" (Excel + write-back).
+    
+    Requirements:
+    1. El archivo JDE debe ser Excel (.xlsx o .xls)
+    2. La cuenta bancaria debe estar en PAPEL_TRABAJO_ACCOUNTS (ej: 6614, 7133)
+    
+    Para otras cuentas (ej: 3478 Banorte), se aceptan archivos CSV normales
+    del JDE sin write-back del Papel de Trabajo.
+    """
+    # Verificar si es archivo Excel
+    is_excel = str(jde_file_path).lower().endswith((".xlsx", ".xls"))
+    if not is_excel:
+        return False
+    
+    # Verificar si alguna cuenta está en la lista de cuentas con Papel de Trabajo
+    for account in bank_accounts:
+        if account in _PAPEL_TRABAJO_ACCOUNTS:
+            return True
+    
+    return False
 
 
 # ============================================================
@@ -262,9 +291,18 @@ def run_pipeline_stage1(
     interactive_result = engine.reconcile_interactive(bank_df, jde_df)
 
     # ── Metadatos para el write-back del Papel de Trabajo ──
-    is_pt = str(jde_file_path).lower().endswith((".xlsx", ".xls"))
+    # Solo usa write-back si: 1) archivo es Excel Y 2) cuenta está en whitelist (6614, 7133)
+    bank_accounts = set(bank_df["account_id"].unique()) if not bank_df.empty else set()
+    is_pt = _is_papel_trabajo_account(bank_accounts, jde_file_path)
+    
     interactive_result["_jde_source_path"]   = str(jde_file_path)
     interactive_result["_is_papel_trabajo"]  = is_pt
+    interactive_result["_bank_accounts"]     = list(bank_accounts)
+
+    if is_pt:
+        logger.info("✓ Papel de Trabajo detectado para cuenta(s): %s", bank_accounts)
+    else:
+        logger.info("ℹ Conciliación normal (sin write-back) para cuenta(s): %s", bank_accounts)
 
     logger.info(
         "Stage 1 completado — %d exactos | %d agrupaciones propuestas",
