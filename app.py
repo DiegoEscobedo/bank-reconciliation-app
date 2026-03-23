@@ -454,6 +454,8 @@ if results.get("_is_papel_trabajo"):
     )
 
 st.markdown("---")
+
+_dl_cols = []
 if results.get("_excel_bytes"):
     _dl_cols.append("conciliacion")
 if results.get("_is_papel_trabajo"):
