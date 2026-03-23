@@ -443,21 +443,17 @@ summary = results["summary"]
 # ── Título y descargas ──────────────────────────────────────────
 st.title("Resultados de Conciliación")
 
-# DEBUG OPCIONAL (comentado por defecto)
-# Descomenta para ver detalles internos del write-back
-# with st.expander("🔍 Debug write-back", expanded=False):
-#     _dbg_jde = results.get("conciliated_jde_movements", pd.DataFrame())
-#     st.write({
-#         "is_papel_trabajo": results.get("_is_papel_trabajo"),
-#         "tiene_jde_bytes":  bool(results.get("_jde_bytes")),
-#         "tiene_jde_path":   bool(results.get("_jde_source_path")),
-#         "cols_conciliados_jde": list(_dbg_jde.columns) if not _dbg_jde.empty else [],
-#         "filas_conciliados_jde": len(_dbg_jde),
-#         "tiene_aux_fact_col": "_aux_fact" in _dbg_jde.columns,
-#         "aux_facts_muestra": list(_dbg_jde["_aux_fact"].dropna().unique()[:5]) if "_aux_fact" in _dbg_jde.columns else [],
-#     })
+# Capturar fecha para el nombre del Papel de Trabajo
+_fecha_descarga = None
+if results.get("_is_papel_trabajo"):
+    st.markdown("#### Fecha para el nombre del archivo")
+    _fecha_descarga = st.date_input(
+        "Selecciona la fecha que deseas incluir en el archivo descargable:",
+        value=datetime.now().date(),
+        label_visibility="collapsed"
+    )
 
-_dl_cols = []
+st.markdown("---")
 if results.get("_excel_bytes"):
     _dl_cols.append("conciliacion")
 if results.get("_is_papel_trabajo"):
@@ -531,11 +527,12 @@ if _dl_cols:
                 # with st.expander("🔬 Debug interno write_back", expanded=True):
                 #     st.write(_wb_debug)
                 with _dl_buttons[_btn_idx]:
-                    fecha_hoy = datetime.now().strftime("%d-%m-%Y")
+                    # Usar la fecha elegida por el usuario o la de hoy
+                    fecha_archivo = _fecha_descarga.strftime("%d-%m-%Y") if _fecha_descarga else datetime.now().strftime("%d-%m-%Y")
                     st.download_button(
                         label="⬇ Descargar Papel de Trabajo actualizado",
                         data=_pt_bytes,
-                        file_name=f"PAPEL DE TRABAJO TRAJETAS {fecha_hoy}.xlsx",
+                        file_name=f"PAPEL DE TRABAJO TRAJETAS {fecha_archivo}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
             except Exception as _pt_err:
