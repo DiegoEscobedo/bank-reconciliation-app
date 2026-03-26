@@ -442,10 +442,7 @@ class ReconciliationEngine:
             )
 
             bank_date = bank_row["movement_date"]
-            bank_account_id = str(bank_row.get("account_id", "")).strip()
 
-            # DEFENSA: Filtrar candidatos JDE por account_id exacto
-            # Previene cruce accidental de comisiones entre cuentas (ej: 6614 vs 7133)
             potential_jde_candidates = jde_dataframe[
                 (jde_dataframe["is_matched"] == False)
                 & (self._is_date_within_tolerance(
@@ -453,18 +450,6 @@ class ReconciliationEngine:
                     jde_dataframe["movement_date"]
                 ))
             ]
-            
-            # DEFENSA: account_id DEBE coincidir (si es que existen)
-            if not potential_jde_candidates.empty and "account_id" in potential_jde_candidates.columns:
-                if bank_account_id:
-                    potential_jde_candidates = potential_jde_candidates[
-                        potential_jde_candidates["account_id"].astype(str).str.strip() == bank_account_id
-                    ]
-                    if potential_jde_candidates.empty and bank_account_id not in ("", "nan", None):
-                        logger.debug(
-                            "[EXACT] Banco idx=%d account_id='%s' -> 0 candidatos JDE con account_id coincidente",
-                            bank_index, bank_account_id
-                        )
 
             if potential_jde_candidates.empty:
                 logger.warning(
@@ -570,7 +555,6 @@ class ReconciliationEngine:
 
             target_amount = round(bank_row["abs_amount"], self.rounding_decimals)
             bank_date     = bank_row["movement_date"]
-            bank_account_id = str(bank_row.get("account_id", "")).strip()
 
             available_jde = jde_dataframe[
                 (jde_dataframe["is_matched"] == False)
@@ -578,12 +562,6 @@ class ReconciliationEngine:
                     bank_date, jde_dataframe["movement_date"]
                 ))
             ]
-
-            # DEFENSA: account_id DEBE coincidir
-            if not available_jde.empty and "account_id" in available_jde.columns and bank_account_id:
-                available_jde = available_jde[
-                    available_jde["account_id"].astype(str).str.strip() == bank_account_id
-                ]
 
             if available_jde.empty:
                 continue
@@ -816,7 +794,6 @@ class ReconciliationEngine:
             target_amount = round(jde_row["abs_amount"], self.rounding_decimals)
             jde_date      = jde_row["movement_date"]
             jde_mvtype    = jde_row.get("movement_type", "")
-            jde_account_id = str(jde_row.get("account_id", "")).strip()
 
             # Candidatos bancarios: pendientes, mismo tipo, dentro de fecha,
             # cada uno menor que el total JDE (si fuera igual, exacto ya matcheó)
@@ -827,12 +804,6 @@ class ReconciliationEngine:
                 & (bank_dataframe["movement_type"] == jde_mvtype)
                 & (bank_dataframe["abs_amount"] < target_amount - self.amount_tolerance)
             ].copy()
-
-            # DEFENSA: account_id DEBE coincidir
-            if not available_bank.empty and "account_id" in available_bank.columns and jde_account_id:
-                available_bank = available_bank[
-                    available_bank["account_id"].astype(str).str.strip() == jde_account_id
-                ]
 
             if len(available_bank) < 2:
                 continue
