@@ -3,10 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.1 |
-| Fecha | 19/03/2026 |
+| Versión | 1.2 |
+| Fecha | 26/03/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
+| Cambios | Adición de Scotiabank, Mercado Pago; Papel de Trabajo para 7133; Fecha conciliación automática |
 
 ---
 
@@ -19,11 +20,12 @@ Este documento define los requisitos funcionales y no funcionales del **Sistema 
 ### 1.2 Alcance
 
 El sistema permite:
-- Cargar archivos de movimientos bancarios (BBVA, Banorte) y del sistema JDE.
-- Ejecutar un motor de conciliación automática con matching exacto y agrupado.
+- Cargar archivos de movimientos bancarios (BBVA, Banorte, Scotiabank, Mercado Pago, NetPay) y del sistema JDE.
+- Ejecutar un motor de conciliación automática con matching exacto, agrupado e inverso.
 - Revisar y aprobar agrupaciones propuestas de manera interactiva.
 - Generar un reporte Excel con los resultados clasificados.
-- Marcar como conciliadas las filas correspondientes en el Papel de Trabajo original.
+- Marcar como conciliadas las filas correspondientes en el Papel de Trabajo original (cuentas 6614 y 7133).
+- Filtrar automáticamente filas grises de Mercado Pago (headers de transacciones).
 
 ### 1.3 Definiciones y acrónimos
 
@@ -40,7 +42,13 @@ El sistema permite:
 ### 1.4 Referencias
 
 - Reporte JDE: R550911A1 (Auxiliar de Contabilidad)
-- Formatos bancarios: Estado de cuenta BBVA CSV, Banorte CSV/Excel
+- Formatos bancarios soportados:
+  - BBVA: Estado de cuenta CSV/Excel
+  - Banorte: Estado de cuenta CSV/Excel
+  - Scotiabank: Estado de cuenta Excel (14 columnas)
+  - Mercado Pago: Estado de cuenta Excel con filas de color
+  - NetPay: Reporte de nómina Excel
+- Papel de Trabajo: Excel R550911A1 con Aux_Fact (Cuentas 6614, 7133)
 
 ---
 
@@ -81,17 +89,20 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 ### RF-01 — Carga de archivos bancarios
 
-**Descripción:** El sistema debe aceptar uno o más archivos de estado de cuenta de bancos soportados (BBVA, Banorte) y archivos de tipo REPORTE CAJA.
+**Descripción:** El sistema debe aceptar archivos de estado de cuenta de múltiples bancos (BBVA, Banorte, Scotiabank, Mercado Pago, NetPay) y archivos de tipo REPORTE CAJA.
 
 **Criterios de aceptación:**
 - Acepta `.csv` y `.xlsx` / `.xls`.
-- Detecta automáticamente el banco por la estructura del archivo.
-- **Robustez de parseo**: El parser BBVA y Banorte normalizan nombres de columnas para manejar variaciones en:
+- Detecta automáticamente el banco por la estructura del archivo (análisis de encabezados y estructura).
+- **Robustez de parseo**: Los parsers normalizan nombres de columnas para manejar variaciones en:
   - Acentos (e.g., "DEPÓSITOS" vs "DEPOSITOS")
   - Espacios extra
   - Variaciones en capitalización
-  - Esta flexibilidad previene errores por diferencias de formato en archivos exportados desde distintos sistemas
-- Si se carga un REPORTE CAJA junto con el estado de cuenta, lo usa para enriquecer los movimientos bancarios con los campos `tienda` y `tipo_banco`.
+- **Casos especiales:**
+  - **Scotiabank**: Valida que tenga al menos 14 columnas; si faltan columnas, usa Series vacíos sin crashear.
+  - **Mercado Pago**: Filtra automáticamente filas con color gris (R=G=B en formato hex AARRGGBB) para descartarheaders de transacciones.
+  - **NetPay**: Detecta por presencia de columnas específicas (Sucursal, Empleado, etc).
+- Si se carga un REPORTE CAJA junto con el estado de cuenta, lo usa para enriquecer los movimientos bancarios con los campos `tienda` y `tipo_pago`.
 - Si solo se carga un REPORTE CAJA (sin estado de cuenta), lo usa como fuente bancaria.
 - Si los nombres de columnas requeridas no se encuentran (incluso después de normalización), el parser lanza un error descriptivo indicando las columnas disponibles.
 
@@ -101,12 +112,17 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 **Descripción:** El sistema debe aceptar archivos del sistema JDE en dos formatos:
 1. CSV R550911A1 (Auxiliar de Contabilidad).
-2. Excel "Papel de Trabajo".
+2. Excel "Papel de Trabajo" (para cuentas 6614 y 7133).
 
 **Criterios de aceptación:**
 - Para CSV: lee el encabezado a partir de la fila 3, extrae fecha, cuenta, monto, tipo de documento y descripción.
-- Para Papel de Trabajo Excel: omite filas donde la columna `CONCILIADO` ya tenga valor (filas ya conciliadas en el pasado).
+- Para Papel de Trabajo Excel:
+  - Detecta automáticamente si es Excel con estructura Papel de Trabajo (presencia de columna `Aux_Fact`).
+  - Omite filas donde la columna `CONCILIADO` ya tenga valor (filas ya conciliadas en el pasado).
+  - Extrae el identificador `Aux_Fact` para poder marcar archivos durante el write-back.
+  - Valida que tenga las columnas requeridas (`Aux_Fact`, `Importe`, `CONCILIADO`, `FECHA CONCILIACION`).
 - Ambos formatos producen el mismo esquema de columnas normalizado.
+- Detecta automáticamente la cuenta (6614 o 7133) para determinar si es elegible para write-back.
 
 ---
 
@@ -145,15 +161,28 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 **Descripción:** El motor debe encontrar correspondencias 1:1 entre movimientos bancarios y JDE basándose en monto y fecha.
 
 **Criterios de aceptación:**
-- Dos movimientos coinciden si la diferencia de montos absolutos es ≤ `AMOUNT_TOLERANCE` (0.10 por defecto).
-- La diferencia de fechas debe ser ≤ `DATE_TOLERANCE_DAYS` (1 día por defecto).
-- Si ambos DataFrames contienen columnas de tienda (`tienda`, `tipo_banco`, `tipo_jde`), se usa ese dato como discriminador adicional antes del monto.
+- Dos movimientos coinciden si la diferencia de montos absolutos es ≤ `AMOUNT_TOLERANCE` (0.50 por defecto).
+- La diferencia de fechas debe ser ≤ `DATE_TOLERANCE_DAYS` (2 días por defecto).
+- Filtrado por tienda: Si ambos movimientos tienen tienda (`tienda` en banco y `tienda` en JDE), deben coincidir exactamente para que sea match exacto. Si uno o ambos carecen de tienda, se acepta el match por monto y fecha.
+- Filtrado por tipo: Si el movimiento bancario es de comisión, solo se emparejan con movimientos JDE que también sean comisión.
 - Cada movimiento solo puede participar en un match (no se reutilizan).
 - Los movimientos matcheados se marcan como `is_matched = True`.
 
 ---
 
-### RF-06 — Matching agrupado
+### RF-06 — Matching inverso
+
+**Descripción:** El motor debe proponer agrupaciones donde N movimientos bancarios (N ≤ `MAX_GROUP_SIZE`) suman el monto de un único movimiento JDE pendiente.
+
+**Criterios de aceptación:**
+- Solo se consideran movimientos sin match exacto.
+- La diferencia entre la suma de movimientos bancarios y el monto JDE debe ser ≤ `AMOUNT_TOLERANCE`.
+- Aplica el mismo filtro por tienda que el matching agrupado.
+- Las agrupaciones inversas se presentan como propuestas al usuario.
+
+---
+
+### RF-07 — Matching agrupado
 
 **Descripción:** El motor debe proponer agrupaciones donde la suma de N movimientos JDE (N ≤ `MAX_GROUP_SIZE`) se aproxima al monto de un movimiento bancario pendiente.
 
@@ -165,7 +194,20 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 ---
 
-### RF-07 — Revisión interactiva de agrupaciones (modo Streamlit)
+### RF-07 — Matching agrupado
+
+**Descripción:** El motor debe proponer agrupaciones donde la suma de N movimientos JDE (N ≤ `MAX_GROUP_SIZE`) se aproxima al monto de un movimiento bancario pendiente.
+
+**Criterios de aceptación:**
+- Solo se consideran movimientos no matcheados en la fase exacta.
+- El tamaño máximo del grupo es `MAX_GROUP_SIZE` (10 por defecto).
+- La diferencia entre el monto bancario y la suma del grupo debe ser ≤ `AMOUNT_TOLERANCE`.
+- Filtrado por tienda: Si el banco tiene tienda, solo se agrupan JDE de la misma tienda.
+- Las agrupaciones se presentan como **propuestas**; el usuario las aprueba o rechaza antes de confirmar.
+
+---
+
+### RF-08 — Revisión interactiva de agrupaciones (modo Streamlit)
 
 **Descripción:** El usuario debe poder revisar cada agrupación propuesta y aprobarla o rechazarla individualmente.
 
@@ -176,7 +218,19 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 ---
 
-### RF-08 — Generación de reporte Excel
+### RF-08 — Revisión interactiva de agrupaciones (modo Streamlit)
+
+**Descripción:** El usuario debe poder revisar cada agrupación propuesta (tanto agrupadas como inversas) y aprobarla o rechazarla individualmente.
+
+**Criterios de aceptación:**
+- La UI muestra cada grupo con: monto bancario, movimientos JDE del grupo, diferencia y tienda (si aplica).
+- El usuario puede seleccionar / deseleccionar grupos con un checkbox.
+- Solo los grupos aprobados se incluyen en el resultado final.
+- Se muestran tanto agrupaciones forward (1 banco ← N JDE) como inversas (N banco → 1 JDE) de forma clara.
+
+---
+
+### RF-09 — Generación de reporte Excel
 
 **Descripción:** El sistema debe generar un archivo Excel con los resultados de la conciliación.
 
@@ -190,7 +244,23 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 ---
 
-### RF-09 — Write-back al Papel de Trabajo
+### RF-09 — Generación de reporte Excel
+
+**Descripción:** El sistema debe generar un archivo Excel con los resultados de la conciliación.
+
+**Criterios de aceptación:**
+- El archivo contiene 5 hojas: **Resumen**, **Exactos**, **Agrupados**, **Agrupados Inversos**, **Pendientes Banco**, **Pendientes JDE**.
+- **Resumen** incluye: total de movimientos banco y JDE, conteo de matches exactos, agrupados, agrupados inversos, conteo de pendientes.
+- **Exactos** incluye: datos banco, datos JDE, diferencia.
+- **Agrupados** incluye: monto banco, cantidad de JDE agrupados, JDE incluidos, diferencia.
+- **Agrupados Inversos** incluye: cantidad de banco agrupados, monto JDE final, banco incluidos, diferencia.
+- **Pendientes** muestran los movimientos banco/JDE sin match con todos sus campos.
+- El archivo tiene formato visual: encabezados con color, filas alternas, formatos de fecha y moneda.
+- El nombre del archivo incluye timestamp: `conciliacion_YYYYMMDD_HHMMSS.xlsx`.
+
+---
+
+### RF-10 — Write-back al Papel de Trabajo
 
 **Descripción:** El sistema debe poder marcar como conciliadas las filas correspondientes en el Papel de Trabajo original del usuario.
 
@@ -203,7 +273,22 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 ---
 
-### RF-10 — Uso por línea de comandos (CLI)
+### RF-10 — Write-back al Papel de Trabajo
+
+**Descripción:** El sistema debe poder marcar como conciliadas las filas correspondientes en el Papel de Trabajo original del usuario (solo para cuentas 6614 y 7133).
+
+**Criterios de aceptación:**
+- Aplica solo si: archivo JDE es Excel Y cuenta está en `PAPEL_TRABAJO_ACCOUNTS` (6614, 7133).
+- Localiza automáticamente la hoja `AUX CONTABLE` en el archivo original.
+- Identifica las columnas `CONCILIADO` y `FECHA CONCILIACION` por nombre (no por posición).
+- Escribe `"Sí"` en `CONCILIADO` y la fecha más reciente de los movimientos bancarios conciliados en `FECHA CONCILIACION` para cada `Aux_Fact` conciliado.
+- La fecha de conciliación es automáticamente la más reciente del banco (no la fecha de ejecución).
+- El resto del archivo (fórmulas, formatos, otras hojas) permanece intacto.
+- El archivo modificado se entrega como descarga en bytes (sin sobreescribir el original directamente).
+
+---
+
+### RF-11 — Uso por línea de comandos (CLI)
 
 **Descripción:** El sistema debe ser operable sin interfaz gráfica.
 
@@ -218,22 +303,29 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 ## 4. Requisitos No Funcionales
 
 ### RNF-01 — Rendimiento
-El procesamiento de archivos de hasta 5,000 movimientos combinados (banco + JDE) debe completarse en menos de 30 segundos en hardware estándar de oficina.
+El procesamiento de archivos de hasta 10,000 movimientos combinados (banco + JDE) debe completarse en menos de 60 segundos en hardware estándar de oficina.
 
 ### RNF-02 — Usabilidad
-La interfaz Streamlit debe ser operable sin conocimientos técnicos: carga de archivos por arrastrar, visualización de resultados en tabla y descarga de reportes en un clic.
+La interfaz Streamlit debe ser operable sin conocimientos técnicos: carga de archivos por arrastrar, visualización de resultados en tabla y descarga de reportes en un clic. Incluye selector de fecha para el nombre del archivo descargado.
 
 ### RNF-03 — Mantenibilidad
-Cada capa (parsers, normalizers, matching, reporting) debe estar aislada en su propio módulo, permitiendo añadir soporte para nuevos bancos o formatos sin modificar el motor.
+Cada capa (parsers, normalizers, engine, reporting) debe estar aislada en su propio módulo, permitiendo añadir soporte para nuevos bancos o formatos sin modificar el motor de conciliación.
 
 ### RNF-04 — Portabilidad
 El sistema debe ejecutarse en Windows, macOS y Linux con Python 3.10+.
 
 ### RNF-05 — Trazabilidad
-Todas las operaciones relevantes deben quedar registradas en el sistema de logs (`logs/`), incluyendo conteos de movimientos, tiempos y errores.
+Todas las operaciones relevantes deben quedar registradas en el sistema de logs (`logs/`), incluyendo conteos de movimientos, tiempos, bancos detectados y errores de parseo.
 
 ### RNF-06 — Tolerancia a variaciones de datos
-El sistema debe manejar diferencias de ±0.10 en montos y ±1 día en fechas entre banco y JDE, configurables en `config/settings.py`.
+El sistema debe manejar diferencias de ±0.50 en montos y ±2 días en fechas entre banco y JDE, configurables en `config/settings.py`.
+
+### RNF-07 — Robustez frente a variaciones de formato
+Los parsers deben tolerar:
+- Nombres de columnas con acentos, espacios extra, capitalización variable
+- Diferentes ordenamientos de columnas
+- Columnas faltantes (ej: Scotiabank con <14 columnas)
+- Filas con color (Mercado Pago)
 
 ---
 
@@ -260,12 +352,26 @@ El sistema debe manejar diferencias de ±0.10 en montos y ±1 día en fechas ent
 - Fila 0: número de cuenta; fila 1: encabezados
 - Columnas esperadas: Fecha, Descripción, Cargo, Abono
 
-### 6.3 JDE — CSV R550911A1
+### 6.3 Estado de cuenta bancario (Scotiabank)
+- Formato Excel
+- Estructur esperada: 14 columnas
+- Validación: Si tiene <14 columnas, usa Series vacíos sin fallar
+
+### 6.4 Estado de cuenta bancario (Mercado Pago)
+- Formato Excel
+- Filas con color gris (R=G=B) son automáticamente descartadas
+
+### 6.5 Nómina (NetPay)
+- Formato Excel
+- Columnas esperadas: Sucursal, Empleado, Concepto, Cantidad
+
+### 6.6 JDE — CSV R550911A1
 - Encabezado en fila 3 (índice 2)
 - Mínimo 23 columnas
 - Columnas relevantes: cuenta (col 9), tipo doc (12), documento (13), fecha (14), importe (16), descripción (21, 22)
 
-### 6.4 JDE — Papel de Trabajo Excel
-- Hoja `AUX CONTABLE`
+### 6.7 JDE — Papel de Trabajo Excel
+- Hoja `AUX CONTABLE` 
 - Columnas requeridas: `Aux_Fact`, `Importe`, `CONCILIADO`, `FECHA CONCILIACION`
 - Filas con `CONCILIADO` no vacío son ignoradas (ya conciliadas)
+- Solo para cuentas 6614 (BBVA) y 7133 (Scotiabank)

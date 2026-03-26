@@ -3,10 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.1 |
-| Fecha | 19/03/2026 |
+| Versión | 1.2 |
+| Fecha | 26/03/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
+| Cambios | Scotiabank, Mercado Pago, matching inverso, fecha conciliación automática, metadatos preservation |
 
 ---
 
@@ -91,10 +92,11 @@ Centraliza todos los parámetros configurables del sistema. No contiene lógica.
 
 | Parámetro | Valor por defecto | Descripción |
 |---|---|---|
-| `AMOUNT_TOLERANCE` | 0.10 | Diferencia máxima de monto permitida para un match |
-| `DATE_TOLERANCE_DAYS` | 1 | Diferencia máxima de días permitida |
+| `AMOUNT_TOLERANCE` | 0.50 | Diferencia máxima de monto permitida para un match |
+| `DATE_TOLERANCE_DAYS` | 2 | Diferencia máxima de días permitida |
 | `MAX_GROUP_SIZE` | 10 | Máximo de movimientos JDE por agrupación |
 | `ROUND_DECIMALS` | 2 | Decimales para redondeo de montos |
+| `PAPEL_TRABAJO_ACCOUNTS` | {"6614", "7133"} | Cuentas elegibles para write-back de Papel |
 | `TIENDA_ABBREV` | dict | Mapeo nombre completo de tienda → abreviatura JDE |
 
 ---
@@ -109,10 +111,18 @@ Centraliza todos los parámetros configurables del sistema. No contiene lógica.
 BankParser
     └── detecta el banco y delega a sub-parser
 _BaseBankParser
-    ├── _BBVAParser     → detecta columnas DEPÓSITOS / RETIROS (normalizadas)
-    ├── _BanorteParser  → detecta encabezado en fila 1 con número de cuenta en fila 0
-    └── _ReporteCajaParser → detecta hoja/formato de reporte de punto de venta
+    ├── _BBVAParser          → BBVA CSV/Excel
+    ├── _BanorteParser       → Banorte CSV/Excel
+    ├── _ScotiabankParser    → Scotiabank Excel (14 columnas, con validación)
+    ├── _MercadoPagoParser   → Mercado Pago Excel (con filtro gris)
+    ├── _NetPayParser        → NetPay Excel
+    └── _ReporteCajaParser   → REPORTE_CAJA Excel (enriquecimiento 6614)
 ```
+
+**Cambios v1.2:**
+- Agregados parsers: Scotiabank (con validación de columnas), Mercado Pago (con filtro gris), NetPay
+- Scotiabank: validación dinámica; si <14 columnas usa Series vacíos
+- Mercado Pago: detecta y descarta filas con color gris (R=G=B en AARRGGBB hex)
 
 **Flujo de detección:**
 1. Lee el archivo completo sin header.
@@ -148,19 +158,37 @@ Esta flexibilidad resuelve problemas de incompatibilidad causados por:
 
 ### 4.3 `src/parsers/jde_parser.py`
 
-**Responsabilidad:** Leer archivos JDE en dos formatos distintos.
+**Responsabilidad:** Leer archivos JDE en dos formatos distintos y detectar automáticamente.
+
+**Auto-detección:**
+```python
+def parse(file_path: str) -> DataFrame:
+    if file_path.endswith(('.xlsx', '.xls')):
+        # ¿Tienes hoja AUX CONTABLE + columna Aux_Fact?
+        # → PapelTrabajoParser (para 6614 o 7133)
+        # Sino → Error
+    else:  # .csv
+        # → CSVParser (R550911A1)
+```
+
+**Cambios v1.2:**
+- Papel de Trabajo ahora soporta cuenta 7133 (Scotiabank) además de 6614 (BBVA)
+- Detección de cuenta automática para determinar elegibilidad para write-back
+- Metadatos `_aux_fact` preservados para write-back posterior
+- Validación de estructura: detecta hoja y columnas requeridas
 
 **Clases:**
 
-| Clase | Formato | Detección |
+| Clase | Formato | Cuenta |
 |---|---|---|
-| `JDEParser` | CSV R550911A1 | Extensión `.csv` o Excel con encabezado en fila 2 |
-| `PapelTrabajoParser` | Excel Papel de Trabajo | Extensión `.xlsx`/`.xls` con hoja `AUX CONTABLE` |
+| `CSVParser` | CSV R550911A1 | Cualquiera (2 cuentas típicamente) |
+| `PapelTrabajoParser` | Excel con Aux_Fact | Solo 6614, 7133 |
 
-**Comportamiento especial de `PapelTrabajoParser`:**
-- Solo carga filas donde `CONCILIADO` está vacío.
+**Comportamiento de `PapelTrabajoParser`:**
+- Solo carga filas donde `CONCILIADO` está vacío (ya conciliadas se ignoran).
 - Extrae `Aux_Fact` para el proceso de write-back posterior.
 - Mapea nombres de tienda usando `TIENDA_ABBREV`.
+- Si encabezado no encontrado, error descriptivo indicando hojas disponibles.
 
 ---
 
