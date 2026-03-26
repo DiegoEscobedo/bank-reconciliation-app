@@ -213,13 +213,22 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     # ya que algunos bancos (ej. NetPay) reportan cuenta larga "0884166614"
     # mientras JDE usa solo los últimos 4 dígitos "6614".
     bank_accounts   = set(bank_df["account_id"].unique())
-    jde_account_ids = jde_df["account_id"].unique()
+    jde_account_ids = set(jde_df["account_id"].unique())
+    
+    logger.info("────────────────────────────────────────────────────")
+    logger.info("[FILTRADO CUENTA] Cuentas en BANCO: %s", sorted(bank_accounts))
+    logger.info("[FILTRADO CUENTA] Cuentas en JDE: %s", sorted(jde_account_ids))
+    
     matched_jde_ids: set = set()
 
     for bank_acct in bank_accounts:
         for jde_acct in jde_account_ids:
             if bank_acct == jde_acct or bank_acct.endswith(jde_acct) or jde_acct.endswith(bank_acct):
                 matched_jde_ids.add(jde_acct)
+                logger.info("[FILTRADO CUENTA] MATCH: banco '%s' ↔ JDE '%s'", bank_acct, jde_acct)
+
+    logger.info("[FILTRADO CUENTA] JDE ids a usar: %s", sorted(matched_jde_ids) if matched_jde_ids else "NINGUNO")
+    logger.info("────────────────────────────────────────────────────")
 
     if matched_jde_ids:
         jde_filtered = jde_df[jde_df["account_id"].isin(matched_jde_ids)].copy()

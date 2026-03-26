@@ -258,6 +258,21 @@ class PapelTrabajoParser:
 
         # ── account_id ──────────────────────────────────────
         account_ids = s(col_account).apply(self._extract_account)
+        
+        # Log detallado: mostrar extracción de accounts
+        account_distribution = account_ids.value_counts()
+        logger.info(
+            "[PapelTrabajo] account_id extracción: %s",
+            dict(account_distribution) if not account_distribution.empty else "SIN CUENTAS EXTRAÍDAS"
+        )
+        
+        # Verificar si hay filas sin account_id
+        if (account_ids.eq("") | account_ids.isna()).any():
+            bad_rows = s(col_account)[account_ids.eq("") | account_ids.isna()]
+            logger.warning(
+                "[PapelTrabajo] %d filas sin account_id extraído. Ejemplos: %s",
+                len(bad_rows), list(bad_rows.iloc[:3]) if len(bad_rows) > 0 else []
+            )
 
         # ── description ─────────────────────────────────────
         desc_det = s(col_desc)

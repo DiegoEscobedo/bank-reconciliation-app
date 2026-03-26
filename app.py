@@ -132,7 +132,7 @@ if jde_file is None and len(bank_files) == 0:
     4. Revisa los resultados y descarga el reporte Excel.
 
     ---
-    **Bancos soportados actualmente:** BBVA · Banorte
+    **Bancos soportados actualmente:** BBVA · Banorte · HSBC · Scotiabank · NetPay · Mercado Pago
     """)
     st.stop()
 
