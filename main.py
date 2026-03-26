@@ -236,6 +236,29 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
             "JDE filtrado por cuenta(s) bancaria(s) %s → JDE id(s) %s (%d movimientos)",
             bank_accounts, matched_jde_ids, len(jde_filtered),
         )
+        
+        # VALIDACIÓN: Si banco tiene SOLO 1 cuenta, filtrar JDE a esa única cuenta
+        # Previene cruce de comisiones cuando banco tiene menos cuentas que JDE
+        if len(bank_accounts) == 1 and len(matched_jde_ids) > 1:
+            single_bank_account = list(bank_accounts)[0]
+            before_count = len(jde_filtered)
+            
+            # Buscar la cuenta JDE que coincida con la única cuenta del banco
+            jde_accts_to_use = {single_bank_account}
+            for jde_acct in matched_jde_ids:
+                if (single_bank_account == jde_acct or 
+                    single_bank_account.endswith(jde_acct) or 
+                    jde_acct.endswith(single_bank_account)):
+                    jde_accts_to_use = {jde_acct}
+                    break
+            
+            jde_filtered = jde_filtered[jde_filtered["account_id"].isin(jde_accts_to_use)].copy()
+            logger.warning(
+                "[SEGURIDAD-CUENTA] Banco solo tiene cuenta '%s' pero JDE tenía %s. "
+                "Filtrando JDE a solo cuenta '%s' (%d -> %d movimientos)",
+                single_bank_account, sorted(matched_jde_ids), list(jde_accts_to_use)[0] if jde_accts_to_use else "NINGUNA",
+                before_count, len(jde_filtered)
+            )
     else:
         jde_filtered = _pd.DataFrame(columns=jde_df.columns)
 
