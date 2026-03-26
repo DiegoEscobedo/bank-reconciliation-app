@@ -167,9 +167,10 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         else (bank_normalized[0] if bank_normalized else _pd.DataFrame())
     )
 
-    # ── Enriquecimiento de REPORTE_CAJA para la cuenta 6614 ──────────────────────────────
-    # Solo enriquece: agrega tienda + tipo_pago al banco
+    # ── Enriquecimiento de REPORTE_CAJA para la cuenta 6614 WB──────────────────────────────
+    # Solo enriquece: agrega tienda + tipo_pago al banco PERO SOLO PARA LA CUENTA 6614
     # No agrega registros sin match
+    # CRÍTICO: Prevenir cruce con otras cuentas (ej: comisión 7133 -10.50 vs comisión 6614 -10.50)
     if reporte_caja_dfs:
         logger.info("[ENRIQUECIMIENTO] %d archivo(s) REPORTE_CAJA disponible(s)", len(reporte_caja_dfs))
         
@@ -183,13 +184,24 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         if not reporte_6614.empty:
             logger.info("[ENRIQUECIMIENTO] Movimientos 6614 en REPORTE_CAJA: %d", len(reporte_6614))
             
-            # Enriquecer banco con reporte (agregar tienda + tipo_pago)
-            bank_df = _enrich_bank_with_reporte(bank_df, reporte_6614)
+            # CRÍTICO: Solo enriquecer los movimientos bancarios de la cuenta 6614
+            # Previene cruce de comisiones de múltiples cuentas con igual monto + fecha
+            bank_6614 = bank_df[bank_df["account_id"] == "6614"].copy() if not bank_df.empty else _pd.DataFrame()
             
-            logger.info(
-                "[ENRIQUECIMIENTO] Banco enriquecido: %d movimientos con tienda",
-                bank_df["tienda"].notna().sum() if "tienda" in bank_df.columns else 0,
-            )
+            if not bank_6614.empty:
+                # Enriquecer solo los movimientos 6614 con reporte (agregar tienda + tipo_pago)
+                bank_6614_enriched = _enrich_bank_with_reporte(bank_6614, reporte_6614)
+                
+                # Recombinar: 6614 enriquecido + otras cuentas sin cambios
+                bank_other = bank_df[bank_df["account_id"] != "6614"].copy()
+                bank_df = _pd.concat([bank_6614_enriched, bank_other], ignore_index=True) if not bank_other.empty else bank_6614_enriched
+                
+                logger.info(
+                    "[ENRIQUECIMIENTO] Banco 6614 enriquecido: %d movimientos con tienda",
+                    bank_6614_enriched["tienda"].notna().sum() if "tienda" in bank_6614_enriched.columns else 0,
+                )
+            else:
+                logger.info("[ENRIQUECIMIENTO] No hay movimientos 6614 en banco para enriquecer")
         else:
             logger.info("[ENRIQUECIMIENTO] No hay movimientos 6614 en REPORTE_CAJA para enriquecer")
 
