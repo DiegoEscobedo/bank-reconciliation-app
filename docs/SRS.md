@@ -163,7 +163,10 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 **Criterios de aceptación:**
 - Dos movimientos coinciden si la diferencia de montos absolutos es ≤ `AMOUNT_TOLERANCE` (0.50 por defecto).
 - La diferencia de fechas debe ser ≤ `DATE_TOLERANCE_DAYS` (2 días por defecto).
-- Filtrado por tienda: Si ambos movimientos tienen tienda (`tienda` en banco y `tienda` en JDE), deben coincidir exactamente para que sea match exacto. Si uno o ambos carecen de tienda, se acepta el match por monto y fecha.
+- **Validación OBLIGATORIA de tienda:** 
+  - Si el banco tiene tienda definida, el JDE DEBE coincidir en tienda exactamente.
+  - Si el banco NO tiene tienda, NO acepta JDE con tienda definida (previene matches ambiguos).
+  - Solo se aceptan matches exactos cuando ambos carecen de tienda O ambos tienen la misma tienda.
 - Filtrado por tipo: Si el movimiento bancario es de comisión, solo se emparejan con movimientos JDE que también sean comisión.
 - Cada movimiento solo puede participar en un match (no se reutilizan).
 - Los movimientos matcheados se marcan como `is_matched = True`.
@@ -177,7 +180,10 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 **Criterios de aceptación:**
 - Solo se consideran movimientos sin match exacto.
 - La diferencia entre la suma de movimientos bancarios y el monto JDE debe ser ≤ `AMOUNT_TOLERANCE`.
-- Aplica el mismo filtro por tienda que el matching agrupado.
+- **Validación de tienda al confirmar:**
+  - Si TODOS los movimientos bancarios provienen de la MISMA tienda → deben coincidir con tienda del JDE (o JDE sin tienda).
+  - Si movimientos bancarios provienen de múltiples tiendas → RECHAZA automáticamente (falso positivo).
+  - Sin tienda en JDE o bancos → se aceptan sin restricción.
 - Las agrupaciones inversas se presentan como propuestas al usuario.
 
 ---
@@ -202,7 +208,10 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - Solo se consideran movimientos no matcheados en la fase exacta.
 - El tamaño máximo del grupo es `MAX_GROUP_SIZE` (10 por defecto).
 - La diferencia entre el monto bancario y la suma del grupo debe ser ≤ `AMOUNT_TOLERANCE`.
-- Filtrado por tienda: Si el banco tiene tienda, solo se agrupan JDE de la misma tienda.
+- **Durante la búsqueda de agrupaciones:** Mayor flexibilidad para explorar posibilidades.
+- **Al confirmar:**
+  - Validación de tienda: Si TODOS los JDE de la agrupación son de UNA tienda diferente a la tienda del banco → RECHAZA automáticamente (previene falsos positivos).
+  - Si bancos o JDE carecen de tienda, se aceptan sin restricción.
 - Las agrupaciones se presentan como **propuestas**; el usuario las aprueba o rechaza antes de confirmar.
 
 ---
@@ -321,11 +330,14 @@ Todas las operaciones relevantes deben quedar registradas en el sistema de logs 
 El sistema debe manejar diferencias de ±0.50 en montos y ±2 días en fechas entre banco y JDE, configurables en `config/settings.py`.
 
 ### RNF-07 — Robustez frente a variaciones de formato
-Los parsers deben tolerar:
-- Nombres de columnas con acentos, espacios extra, capitalización variable
-- Diferentes ordenamientos de columnas
-- Columnas faltantes (ej: Scotiabank con <14 columnas)
-- Filas con color (Mercado Pago)
+Los parsers y motor de matching deben tolerar:
+- **Parseo:** Nombres de columnas con acentos, espacios extra, capitalización variable
+- **Parseo:** Diferentes ordenamientos de columnas, columnas faltantes (ej: Scotiabank con <14 columnas)
+- **Parseo:** Filas con color (Mercado Pago)
+- **Matching:** Prevención de falsos positivos - rechaza agrupaciones donde tiendas no coinciden
+  - Exacto: Obligatorio match de tienda si existe en alguno de los movimientos
+  - Agrupado: Rechaza si todos los JDE son de una tienda diferente al banco
+  - Inverso: Rechaza si bancos provienen de múltiples tiendas
 
 ---
 

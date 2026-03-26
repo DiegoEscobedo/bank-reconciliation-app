@@ -104,6 +104,8 @@ class ReconciliationEngine:
         Fase 2: aplica únicamente los grupos con ``group_id`` en
         ``approved_group_ids`` y construye el resultado final con el
         mismo esquema que ``reconcile``.
+        
+        Valida prevención de falsos positivos por tienda en agrupados.
         """
         bank_df = interactive_result["_bank_df_full"]
         jde_df  = interactive_result["_jde_df_full"]
@@ -114,13 +116,35 @@ class ReconciliationEngine:
             if proposal["group_id"] not in approved_group_ids:
                 continue
 
-            bank_df.at[proposal["bank_row_index"], "is_matched"] = True
+            # Validación de tienda: prevenir falsos positivos en agrupados
+            # Si todos los JDE comparten tienda y es diferente a la del banco → RECHAZAR
+            bank_idx = proposal["bank_row_index"]
+            bank_row = bank_df.loc[bank_idx]
+            bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
+            
+            if "tienda" in jde_df.columns and bank_tienda:
+                jde_tiendas = set()
+                for jde_idx in proposal["jde_row_indices"]:
+                    jde_tienda = str(jde_df.at[jde_idx, "tienda"] or "").strip().upper()
+                    if jde_tienda:  # Solo contar tiendas definidas
+                        jde_tiendas.add(jde_tienda)
+                
+                # Si TODOS los JDE de la agrupación son de UNA tienda diferente → prevenir
+                if len(jde_tiendas) == 1 and list(jde_tiendas)[0] != bank_tienda:
+                    logger.warning(
+                        "[GROUPED-TIENDA-FILTER] Agrupación %d rechazada: "
+                        "Banco tienda='%s' pero todos JDE son tienda='%s' (posible falso positivo)",
+                        proposal["group_id"], bank_tienda, list(jde_tiendas)[0]
+                    )
+                    continue  # Saltarse esta agrupación para evitar falso positivo
+
+            bank_df.at[bank_idx, "is_matched"] = True
             for jde_idx in proposal["jde_row_indices"]:
                 jde_df.at[jde_idx, "is_matched"] = True
 
             confirmed_grouped.append({
                 "match_type":        "grouped",
-                "bank_row_index":    proposal["bank_row_index"],
+                "bank_row_index":    bank_idx,
                 "jde_row_indices":   proposal["jde_row_indices"],
                 "amount_difference": proposal["amount_difference"],
             })
@@ -136,13 +160,41 @@ class ReconciliationEngine:
             if any(bank_df.at[bi, "is_matched"] for bi in proposal["bank_row_indices"]):
                 continue
 
-            jde_df.at[proposal["jde_row_index"], "is_matched"] = True
+            # Validación de tienda para inverso: todos los bancos deben ser de la MISMA tienda
+            jde_idx = proposal["jde_row_index"]
+            jde_row = jde_df.loc[jde_idx]
+            jde_tienda = str(jde_row.get("tienda") or "").strip().upper()
+            
+            if "tienda" in bank_df.columns and jde_tienda:
+                bank_tiendas = set()
+                for bank_idx in proposal["bank_row_indices"]:
+                    bank_tienda = str(bank_df.at[bank_idx, "tienda"] or "").strip().upper()
+                    if bank_tienda:  # Solo contar tiendas definidas
+                        bank_tiendas.add(bank_tienda)
+                
+                # Si bancos son de MÚLTIPLES tiendas O de tienda diferente a JDE → prevenir
+                if len(bank_tiendas) > 1:
+                    logger.warning(
+                        "[REVERSE-TIENDA-FILTER] Inverso %d rechazado: "
+                        "JDE tienda='%s' pero bancos provienen de múltiples tiendas %s (falso positivo)",
+                        proposal["group_id"], jde_tienda, bank_tiendas
+                    )
+                    continue
+                elif len(bank_tiendas) == 1 and list(bank_tiendas)[0] != jde_tienda:
+                    logger.warning(
+                        "[REVERSE-TIENDA-FILTER] Inverso %d rechazado: "
+                        "JDE tienda='%s' pero todos bancos son tienda='%s' (falso positivo)",
+                        proposal["group_id"], jde_tienda, list(bank_tiendas)[0]
+                    )
+                    continue
+
+            jde_df.at[jde_idx, "is_matched"] = True
             for bi in proposal["bank_row_indices"]:
                 bank_df.at[bi, "is_matched"] = True
 
             confirmed_reverse.append({
                 "match_type":        "reverse_grouped",
-                "jde_row_index":     proposal["jde_row_index"],
+                "jde_row_index":     jde_idx,
                 "bank_row_indices":  proposal["bank_row_indices"],
                 "amount_difference": proposal["amount_difference"],
             })
@@ -161,6 +213,27 @@ class ReconciliationEngine:
             bank_idx = proposal.get("matched_bank_row_index")
             if bank_idx is not None and bank_df.at[bank_idx, "is_matched"]:
                 continue
+            
+            # Validación de tienda para color: prevenir falsos positivos
+            if bank_idx is not None and "tienda" in jde_df.columns:
+                bank_row = bank_df.at[bank_idx]
+                bank_tienda = str(bank_row.get("tienda", "") or "").strip().upper()
+                
+                if bank_tienda:
+                    jde_tiendas = set()
+                    for ji in proposal["jde_row_indices"]:
+                        jde_tienda = str(jde_df.at[ji, "tienda"] or "").strip().upper()
+                        if jde_tienda:
+                            jde_tiendas.add(jde_tienda)
+                    
+                    # Si TODOS los JDE son de UNA tienda diferente → prevenir
+                    if len(jde_tiendas) == 1 and list(jde_tiendas)[0] != bank_tienda:
+                        logger.warning(
+                            "[COLOR-TIENDA-FILTER] Color %s rechazado: "
+                            "Banco tienda='%s' pero JDE tienda='%s' (falso positivo)",
+                            proposal["color"], bank_tienda, list(jde_tiendas)[0]
+                        )
+                        continue
             
             # Marcar JDE como conciliadas
             for ji in proposal["jde_row_indices"]:
@@ -395,14 +468,25 @@ class ReconciliationEngine:
                 potential_jde_candidates, bank_row
             )
 
-            # Para exact match: validación estricta de tienda
-            # Si el banco tiene tienda y el JDE también, deben coincidir
+            # EXACT MATCH: Validación OBLIGATORIA de tienda
+            # Si existe tienda en banco O JDE, DEBEN coincidir exactamente
             bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
-            if bank_tienda and "tienda" in potential_jde_candidates.columns:
-                # Solo candidatos con tienda que coincida exactamente
-                potential_jde_candidates = potential_jde_candidates[
-                    potential_jde_candidates["tienda"].str.strip().str.upper() == bank_tienda
-                ]
+            if "tienda" in potential_jde_candidates.columns:
+                potential_jde_candidates["jde_tienda"] = (
+                    potential_jde_candidates["tienda"].str.strip().str.upper()
+                )
+                # Si banco tiene tienda, solo exacto match
+                if bank_tienda:
+                    potential_jde_candidates = potential_jde_candidates[
+                        potential_jde_candidates["jde_tienda"] == bank_tienda
+                    ]
+                else:
+                    # Si banco NO tiene tienda, rechaza JDE con tienda definida
+                    # (previene matches ambiguos de tiendas desconocidas)
+                    potential_jde_candidates = potential_jde_candidates[
+                        potential_jde_candidates["jde_tienda"] == ""
+                    ]
+                potential_jde_candidates = potential_jde_candidates.drop(columns=["jde_tienda"])
 
             for jde_index, jde_row in potential_jde_candidates.iterrows():
 

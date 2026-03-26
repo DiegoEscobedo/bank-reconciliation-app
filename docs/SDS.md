@@ -260,8 +260,23 @@ Fase 2: confirm_grouped_matches(interactive_result, approved_group_ids)
     4. Calcula el summary
 ```
 
-#### Discriminación por tienda
-Cuando los DataFrames tienen columnas `tienda` y `tipo_banco`/`tipo_jde`, el motor aplica el mapa `_TIPO_MAP` para verificar compatibilidad de tipo de pago antes de comparar montos. Esto reduce falsos positivos sin romper la lógica para archivos sin esas columnas.
+#### Discriminación por tienda - Prevención de falsos positivos
+
+**Matching Exacto (1:1) - OBLIGATORIO:**
+- Si el banco tiene tienda definida → JDE DEBE coincidir exactamente en tienda.
+- Si el banco NO tiene tienda → RECHAZA JDE con tienda definida (previene ambigüedad).
+- Solo se aceptan: (ambos vacios) O (ambos con misma tienda).
+- **Objetivo:** Máxima precisión en matches 1:1.
+
+**Matching Agrupado Forward (1:N) - Flexible con validación final:**
+- **Durante búsqueda:** Mayor flexibilidad para encontrar agrupaciones potenciales.
+- **Al confirmar (Fase 2):** Si TODOS los JDE de la agrupación son de UNA tienda diferente al banco → **RECHAZA automáticamente**.
+- **Objetivo:** Evitar falsos positivos que agrupan movimientos de tienda "A" con banco de tienda "B".
+
+**Matching Inverso (N→1):**
+- Si bancos provienen de múltiples tiendas → **RECHAZA** (falso positivo evidente).
+- Si todos bancos de tienda "A" pero JDE de tienda "B" → **RECHAZA**.
+- **Objetivo:** Garantizar que agrupaciones inversas sean de tienda coherente.
 
 #### Estructura del dict de resultados
 
