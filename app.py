@@ -509,12 +509,21 @@ if _dl_cols:
         else:
             _aux_facts = []
 
+        # Obtener fecha de los movimientos banco conciliados (fecha más reciente)
+        _conciliados_banco = results.get("conciliated_bank_movements", pd.DataFrame())
+        _fecha_conciliacion = None
+        if not _conciliados_banco.empty and "movement_date" in _conciliados_banco.columns:
+            _fechas = pd.to_datetime(_conciliados_banco["movement_date"])
+            # Usar la fecha más reciente (máxima)
+            _fecha_conciliacion = _fechas.max().date()
+
         # DEBUG OPCIONAL (comentado por defecto) — muestra qué aux_facts se encontraron
-        # st.caption(
-        #     f"🔍 DEBUG write-back: is_papel={results.get('_is_papel_trabajo')} | "
-        #     f"tiene_bytes={bool(results.get('_jde_bytes'))} | "
-        #     f"aux_facts ({len(_aux_facts)}): {_aux_facts[:5]}"
-        # )
+        st.caption(
+            f"🔍 DEBUG write-back: is_papel={results.get('_is_papel_trabajo')} | "
+            f"tiene_bytes={bool(results.get('_jde_bytes'))} | "
+            f"aux_facts ({len(_aux_facts)}): {_aux_facts[:5]} | "
+            f"fecha_conciliacion={_fecha_conciliacion}"
+        )
 
         # Usar bytes guardados (el TemporaryDirectory ya fue destruido)
         _pt_source = results.get("_jde_bytes") or results.get("_jde_source_path", "")
@@ -523,11 +532,11 @@ if _dl_cols:
                 _reporter = ExcelReporter()
                 _wb_debug: dict = {}
                 _pt_bytes = _reporter.write_back_conciliados(
-                    _pt_source, _aux_facts, debug_info=_wb_debug
+                    _pt_source, _aux_facts, match_date=_fecha_conciliacion, debug_info=_wb_debug
                 )
                 # DEBUG OPCIONAL (comentado por defecto) — muestra detalles del write-back
-                # with st.expander("🔬 Debug interno write_back", expanded=True):
-                #     st.write(_wb_debug)
+                with st.expander("🔬 Debug interno write_back", expanded=False):
+                    st.write(_wb_debug)
                 with _dl_buttons[_btn_idx]:
                     # Usar la fecha elegida por el usuario o la de hoy
                     fecha_archivo = _fecha_descarga.strftime("%d-%m-%Y") if _fecha_descarga else datetime.now().strftime("%d-%m-%Y")
@@ -541,7 +550,7 @@ if _dl_cols:
                 import traceback
                 st.warning(f"No se pudo generar el Papel de Trabajo actualizado: {_pt_err}")
                 # DEBUG OPCIONAL (comentado por defecto) — muestra traceback en caso de error
-                # st.code(traceback.format_exc())
+                st.code(traceback.format_exc())
         elif results.get("_is_papel_trabajo"):
             st.info("No se encontraron Aux_Facts para marcar en el Papel de Trabajo.")
 

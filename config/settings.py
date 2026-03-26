@@ -18,7 +18,7 @@ TIENDA_ABBREV: dict[str, str] = {
     "OUTLET FRESNILLO":    "OUF",
     "OUTLET GUADALUPE":    "OUG",
     "OUTLET JEREZ":        "OUJ",
-    "OUTLET OJOCALIENTE":  "OUO",
+    "OUTLET OJOCALIENTE":  "OUOJO",
     "O OJOCALIENTE":       "OUO",
     "O CALERA":            "OUC",   # alias usado en papel de trabajo
     "OUTLET RIO GRANDE":   "RG",
@@ -34,7 +34,7 @@ TIENDA_ABBREV: dict[str, str] = {
     "TIENDA RIO GRANDE":   "RG",
     # Abreviaturas directas (si el archivo ya trae la abreviatura)
     "FAB":  "FAB", "OUF": "OUF", "OUG": "OUG", "OUJ": "OUJ",
-    "OUO":  "OUO", "OUT": "RG",  "BLVD": "BLVD", "OUZ": "OUZ",
+    "OUOJO":  "OUOJO", "OUT": "RG",  "BLVD": "BLVD", "OUZ": "OUZ",
     "FRE":  "FRE", "JER": "JER", "JAL": "JAL",  "GAL": "GAL",
     "OUC":  "OUC", "RG":  "RG",
     # NetPay: columna Sucursal → abreviatura JDE
@@ -47,7 +47,7 @@ TIENDA_ABBREV: dict[str, str] = {
     "CESANTONI FRESNILLO": "FRE",
     "CESANTONI JALPA":     "JAL",
     "CESANTONI JEREZ":     "JER",
-    "CESANTONI OJOCALIENTE": "OUO",
+    "CESANTONI OJOCALIENTE": "OUOJO",
     "CESANTONI RIO GRANDE":   "RG",
     "CESANTONI ZACATECAS":   "OUZ",
     "CESANTONI ZAC":          "OUZ",
@@ -61,14 +61,14 @@ TIENDA_ABBREV: dict[str, str] = {
     "OUTLET GUADALUPE":    "OUG",
     "OUTLET JALPA":        "JAL",
     "OUTLET JEREZ":        "OUJ",
-    "OUTLET OJOCALIENTE":  "OUO",
+    "OUTLET OJOCALIENTE":  "OUOJO",
     "OUTLET RIO GRANDE":   "RG",
     "OUTLET ZAC":          "OUZ",
     "OUTLET ZACATECAS":    "OUZ",
     # Tiendas (nombres completos y abreviados como vienen en MP)
     "TIENDA BLVD":         "BLVD",
     "TIENDA BOULEVARD":    "BLVD",
-    "TIENDA CALERA":       "OUC",
+    "TIENDA CALERA":       "FAB",
     "TIENDA FAB":          "FAB",
     "TIENDA FABRICA":      "FAB",
     "TIENDA FLLO":         "FRE",

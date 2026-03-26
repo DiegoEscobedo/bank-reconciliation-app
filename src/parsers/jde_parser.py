@@ -173,7 +173,29 @@ class PapelTrabajoParser:
                 raw = pd.read_excel(
                     xl, sheet_name=sheet, header=None, dtype=str
                 ).fillna("")
+                
+                # Validar que el sheet no esté vacío
+                if raw.empty:
+                    logger.warning("[PapelTrabajo] Hoja '%s' vacía, saltando", sheet)
+                    continue
+                
                 header_idx = self._find_header_row(raw)
+                
+                # Validar que se encontró la fila header y que existe en el DataFrame
+                if header_idx == -1:
+                    logger.warning(
+                        "[PapelTrabajo] Hoja '%s' — no tiene estructura esperada (falta 'Aux_Fact' + 'Importe'), saltando",
+                        sheet
+                    )
+                    continue
+                
+                if header_idx >= len(raw):
+                    logger.warning(
+                        "[PapelTrabajo] Hoja '%s' — header_idx=%d fuera de rango (rows=%d), saltando",
+                        sheet, header_idx, len(raw)
+                    )
+                    continue
+                
                 headers = [str(v).strip() for v in raw.iloc[header_idx].values]
                 df = raw.iloc[header_idx + 1:].copy().reset_index(drop=True)
                 df.columns = headers
@@ -189,12 +211,14 @@ class PapelTrabajoParser:
 
     @staticmethod
     def _find_header_row(raw: pd.DataFrame) -> int:
-        """Busca la fila que contiene 'Aux_Fact' + 'Importe'."""
+        """Busca la fila que contiene 'Aux_Fact' + 'Importe'.
+        Retorna el índice de la fila encontrada, o -1 si no existe."""
         for i, row in raw.iterrows():
             vals = [str(v).strip() for v in row.values]
             if "Aux_Fact" in vals and "Importe" in vals:
                 return i
-        return 0
+        logger.warning("[PapelTrabajo] No se encontró fila con 'Aux_Fact' + 'Importe'")
+        return -1
 
     # ─────────────────────────────────────────────────────────
     # Construcción de output

@@ -380,7 +380,7 @@ class ReconciliationEngine:
 
             if potential_jde_candidates.empty:
                 logger.warning(
-                    "[EXACT] Banco idx=%d  amt=%.2f  fecha=%s → 0 candidatos JDE por fecha (tolerancia=%d días)",
+                    "[EXACT] Banco idx=%d  amt=%.2f  fecha=%s -> 0 candidatos JDE por fecha (tolerancia=%d dias)",
                     bank_index, bank_amount,
                     str(bank_date)[:10] if pd.notna(bank_date) else "NaT",
                     self.date_tolerance_days,
@@ -394,6 +394,15 @@ class ReconciliationEngine:
             potential_jde_candidates = self._filter_by_comision(
                 potential_jde_candidates, bank_row
             )
+
+            # Para exact match: validación estricta de tienda
+            # Si el banco tiene tienda y el JDE también, deben coincidir
+            bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
+            if bank_tienda and "tienda" in potential_jde_candidates.columns:
+                # Solo candidatos con tienda que coincida exactamente
+                potential_jde_candidates = potential_jde_candidates[
+                    potential_jde_candidates["tienda"].str.strip().str.upper() == bank_tienda
+                ]
 
             for jde_index, jde_row in potential_jde_candidates.iterrows():
 
@@ -766,7 +775,7 @@ class ReconciliationEngine:
             })
             group_id += 1
             logger.info(
-                "[REV-GROUPED] JDE idx=%d  amt=%.2f → %d filas banco  diff=%.2f",
+                "[REV-GROUPED] JDE idx=%d  amt=%.2f -> %d filas banco  diff=%.2f",
                 jde_index, target_amount, len(bank_indices), diff,
             )
 

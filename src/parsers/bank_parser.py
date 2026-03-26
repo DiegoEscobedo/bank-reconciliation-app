@@ -293,15 +293,32 @@ class _ScotiabankParser(_BaseBankParser):
         df = raw[raw.iloc[:, self._IDX_AMOUNT].str.strip().ne("")].copy()
         df = df.reset_index(drop=True)
 
+        if df.empty:
+            logger.warning("[SCOTIABANK] No hay filas válidas con monto")
+            return pd.DataFrame(columns=["account_id", "bank", "raw_date", "description", 
+                                        "description_detail", "raw_deposit", "raw_withdrawal"])
+
         account_id = str(df.iloc[0, self._IDX_ACCOUNT]).strip() if len(df) else "UNKNOWN"
         logger.info("[SCOTIABANK] Cuenta detectada: %s", account_id)
+
+        # Validar que las columnas necesarias existan
+        num_cols = df.shape[1]
+        logger.info("[SCOTIABANK] Archivo tiene %d columnas", num_cols)
+        
+        # Si no existe la columna de detalle, usar string vacío
+        if num_cols > self._IDX_DETAIL:
+            detail = df.iloc[:, self._IDX_DETAIL].astype(str).str.strip().replace("nan", "")
+        else:
+            logger.warning("[SCOTIABANK] Columna detalle (idx=%d) no existe (total=%d), usando vacío", 
+                          self._IDX_DETAIL, num_cols)
+            detail = pd.Series("", index=df.index)
 
         result = pd.DataFrame({
             "account_id":          df.iloc[:, self._IDX_ACCOUNT].astype(str).str.strip(),
             "bank":                self.BANK_NAME,
             "raw_date":            df.iloc[:, self._IDX_DATE].astype(str).str.strip(),
             "description":         df.iloc[:, self._IDX_DESC].astype(str).str.strip(),
-            "description_detail":  df.iloc[:, self._IDX_DETAIL].astype(str).str.strip().replace("nan", ""),
+            "description_detail":  detail,
             "raw_deposit":         df.apply(
                 lambda r: r.iloc[self._IDX_AMOUNT] if str(r.iloc[self._IDX_TYPE]).strip() == "Abono" else "",
                 axis=1,

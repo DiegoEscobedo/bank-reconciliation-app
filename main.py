@@ -48,9 +48,17 @@ def _is_papel_trabajo_account(bank_accounts: set, jde_file_path: str) -> bool:
         return False
     
     # Verificar si alguna cuenta está en la lista de cuentas con Papel de Trabajo
+    # Soportar cuentas con prefijo (ej: '20305077133') o sin (ej: '7133')
     for account in bank_accounts:
-        if account in _PAPEL_TRABAJO_ACCOUNTS:
+        account_str = str(account).strip()
+        # Intentar match directo
+        if account_str in _PAPEL_TRABAJO_ACCOUNTS:
             return True
+        # Si no, intentar comparar últimos 4 dígitos (ej: '20305077133' termina con '7133')
+        if len(account_str) > 4:
+            short_account = account_str[-4:]
+            if short_account in _PAPEL_TRABAJO_ACCOUNTS:
+                return True
     
     return False
 
@@ -354,6 +362,17 @@ def run_pipeline_stage2(
     report_path = reporter.generate(results, output_path)
 
     _print_summary(results["summary"], report_path)
+    
+    # Preservar metadatos del interactive_result en el resultado final
+    if "_is_papel_trabajo" in interactive_result:
+        results["_is_papel_trabajo"] = interactive_result["_is_papel_trabajo"]
+    if "_jde_bytes" in interactive_result:
+        results["_jde_bytes"] = interactive_result["_jde_bytes"]
+    if "_jde_source_path" in interactive_result:
+        results["_jde_source_path"] = interactive_result["_jde_source_path"]
+    if "_bank_accounts" in interactive_result:
+        results["_bank_accounts"] = interactive_result["_bank_accounts"]
+    
     return results
 
 
