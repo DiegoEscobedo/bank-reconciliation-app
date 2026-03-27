@@ -949,9 +949,10 @@ class ReconciliationEngine:
                 )
                 continue
             
-            # Filtro: solo procesar si Estado contiene "Aprobado"
+            # Filtro: solo procesar si Estado contiene Aprobado/Aprovado
             raw_status = str(row.get("raw_status", "")).strip().lower()
-            if "aprobado" not in raw_status:
+            is_approved_status = ("aprobado" in raw_status) or ("aprovado" in raw_status)
+            if not is_approved_status:
                 logger.debug(
                     "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s Estado='%s' - IGNORADA (no Aprobado)",
                     idx, color, raw_status

@@ -604,11 +604,9 @@ class _MercadoPagoParser(_BaseBankParser):
                 cell_color = self._get_cell_color_hex(
                     ws[f"{col_letter_total}{excel_row_idx}"]
                 )
-                
-                # Si la fila no tiene color válido, saltarla
-                if cell_color is None:
-                    skipped_rows.append((excel_row_idx, "NO_COLOR"))
-                    continue
+                # La selección final de filas válidas por color se hace en main.py
+                # (grupos cuyo total aparece en Scotiabank). Aquí no descartamos por color.
+                cell_color = cell_color or ""
                 
                 # Obtener datos de la fila desde pandas
                 # Conversión: Excel usa 1-indexed, pandas usa 0-indexed
@@ -617,14 +615,18 @@ class _MercadoPagoParser(_BaseBankParser):
                     break
                 
                 row_data = raw.iloc[pandas_row_idx]
-                amounts_str = str(row_data.iloc[idx_amount]).strip()
-                amount_normalized = self._normalize_amount(amounts_str)
+                cobro_str = str(row_data.iloc[idx_amount]).strip()
+                total_recibir_str = str(row_data.iloc[idx_total_recibir]).strip()
+                cobro_normalized = self._normalize_amount(cobro_str)
+                total_recibir_normalized = self._normalize_amount(total_recibir_str)
+                # Para match contra JDE se usa COBRO (requerimiento funcional).
+                amount_normalized = cobro_normalized
                 status_text = str(row_data.iloc[idx_status]).strip().lower()
                 folio_text = str(row_data.iloc[idx_folio]).strip()
                 
                 # Filtrar filas sin monto válido
                 if amount_normalized in ("", "nan", "0", "0.0"):
-                    skipped_rows.append((excel_row_idx, f"EMPTY_AMOUNT:{amounts_str}"))
+                    skipped_rows.append((excel_row_idx, f"EMPTY_COBRO:cobro={cobro_str}|total={total_recibir_str}"))
                     logger.debug("[MERCADOPAGO] Fila %d ignorada: monto vacío o 0", excel_row_idx)
                     continue
                 
@@ -633,11 +635,15 @@ class _MercadoPagoParser(_BaseBankParser):
                     float(amount_normalized)
                 except ValueError:
                     skipped_rows.append((excel_row_idx, f"INVALID_AMOUNT:{amount_normalized}"))
-                    logger.debug("[MERCADOPAGO] Fila %d ignorada: monto inválido '%s' -> '%s'", excel_row_idx, amounts_str, amount_normalized)
+                    logger.debug(
+                        "[MERCADOPAGO] Fila %d ignorada: COBRO inválido cobro='%s' total='%s' -> '%s'",
+                        excel_row_idx, cobro_str, total_recibir_str, amount_normalized,
+                    )
                     continue
                 
-                # Filtrar filas sin "Aprobado" en Estado
-                if "aprobado" not in status_text:
+                # Filtrar filas sin estado aprobado (Aprobado/Aprovado)
+                is_approved_status = ("aprobado" in status_text) or ("aprovado" in status_text)
+                if not is_approved_status:
                     skipped_rows.append((excel_row_idx, f"STATUS:{status_text}"))
                     logger.debug("[MERCADOPAGO] Fila %d ignorada: Estado='%s' (no Aprobado)", excel_row_idx, status_text)
                     continue
@@ -650,7 +656,9 @@ class _MercadoPagoParser(_BaseBankParser):
                     "cell_color": cell_color,
                     "folio": folio_text,
                     "raw_date": str(row_data.iloc[idx_date]).strip(),
-                    "raw_amount": amount_normalized,  # NORMALIZADO: sin $ ni comas
+                    "raw_amount": amount_normalized,  # COBRO normalizado
+                    "raw_cobro": cobro_normalized,
+                    "raw_total_recibir": total_recibir_normalized,
                     "raw_status": status_text,
                     "raw_sucursal": str(row_data.iloc[idx_sucursal]).strip().replace("nan", ""),
                 })
@@ -661,7 +669,7 @@ class _MercadoPagoParser(_BaseBankParser):
                 logger.debug("[MERCADOPAGO] Filas descartadas: %s", skipped_rows[:10])
             
             if not data_rows:
-                logger.warning("[MERCADOPAGO] No se encontraron filas con colores válidos")
+                logger.warning("[MERCADOPAGO] No se encontraron filas válidas (monto/estado)")
                 return pd.DataFrame(columns=["account_id", "bank", "raw_date",
                                              "description", "description_detail",
                                              "raw_deposit", "raw_withdrawal", "cell_color"])
@@ -688,6 +696,8 @@ class _MercadoPagoParser(_BaseBankParser):
                 "raw_deposit":        data["raw_amount"],
                 "raw_withdrawal":     "",
                 "cell_color":         data["cell_color"],  # color de celda para grouping
+                "raw_cobro":          data["raw_cobro"],
+                "raw_total_recibir":  data["raw_total_recibir"],
                 "raw_status":         data["raw_status"],   # Estado (Aprobado, etc)
                 "_excel_row_idx":     data["excel_row_idx"],  # para write-back
             })

@@ -269,6 +269,7 @@ class ExcelReporter:
         reconciled_aux_facts: list,
         match_date: "date | None" = None,
         debug_info: "dict | None" = None,
+        filter_accounts: "list | None" = None,
     ) -> bytes:
         """
         Marca como conciliadas en el Papel de Trabajo las filas que
@@ -295,6 +296,9 @@ class ExcelReporter:
             Lista de valores Aux_Fact (str/int) a marcar.
         match_date : date, opcional
             Fecha de conciliación; por defecto hoy.
+        filter_accounts : list, opcional
+            Cuentas permitidas (ej: ['7133']) — solo marca filas de esas cuentas.
+            Si no se proporciona, marca ALL filas.
 
         Retorna
         -------
@@ -375,11 +379,12 @@ class ExcelReporter:
         # ── 3. Detectar fila de encabezado y columnas clave desde el XML ──────
         # Buscamos la primera fila donde alguna celda t="s" tiene el valor
         # "Aux_Fact" (cuyo índice en sharedStrings es típicamente 0).
-        target_col_names = {"Aux_Fact", "CONCILIADO", "FECHA CONCILIACION"}
+        target_col_names = {"Aux_Fact", "CONCILIADO", "FECHA CONCILIACION", "Descripción", "Descripcion"}
         header_row_idx: int | None = None
         col_aux_letter: str | None = None
         col_conc_letter: str | None = None
         col_fecha_letter: str | None = None
+        col_desc_letter: str | None = None  # Para filtrar por "CUENTA XXXX"
 
         # Iterar filas del worksheet XML buscando el encabezado
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
@@ -409,6 +414,8 @@ class ExcelReporter:
                         col_conc_letter = col_ltr
                     elif val == "FECHA CONCILIACION":
                         col_fecha_letter = col_ltr
+                    elif val in ("Descripción", "Descripcion"):
+                        col_desc_letter = col_ltr
                 break
 
         if debug_info is not None:
@@ -441,6 +448,14 @@ class ExcelReporter:
                 pass
         rows_to_mark: list[int] = []
         _dbg_aux_vals: list = []  # primeros valores de Aux_Fact vistos en XML
+
+        # DEBUG: Guardar estado inicial
+        if debug_info is not None:
+            debug_info["filter_accounts"] = filter_accounts
+            debug_info["col_aux_letter"] = col_aux_letter
+            debug_info["col_desc_letter"] = col_desc_letter
+            debug_info["header_row_idx"] = header_row_idx
+            debug_info["reconciled_set"] = list(reconciled_set)[:20]
 
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
             row_txt = row_m.group()
@@ -482,7 +497,36 @@ class ExcelReporter:
                 _dbg_aux_vals.append({"row": rn, "raw_v": v_m.group(1).strip() if v_m else None, "aux_val": aux_val})
 
             if aux_val in reconciled_set:
-                rows_to_mark.append(rn)
+                # Si hay filter_accounts, verificar que la cuenta de esta fila esté incluida
+                should_mark = True
+                if filter_accounts and col_desc_letter is not None:
+                    # Extraer cuenta de la columna Descripción
+                    desc_cell_m = re.search(
+                        rf'<c\s+r="{col_desc_letter}{rn}"[^>]*>(.*?)</c>',
+                        row_txt, re.DOTALL,
+                    )
+                    if desc_cell_m:
+                        desc_inner = desc_cell_m.group(1)
+                        # Extraer valor de descripción
+                        desc_val = ""
+                        v_m_desc = re.search(r"<v>([^<]+)</v>", desc_inner)
+                        if v_m_desc:
+                            raw_desc = v_m_desc.group(1).strip()
+                            t_attr_m_desc = re.search(r't="s"', desc_cell_m.group(0))
+                            if t_attr_m_desc:
+                                idx_desc = int(raw_desc)
+                                desc_val = ss_values[idx_desc] if idx_desc < len(ss_values) else raw_desc
+                            else:
+                                desc_val = raw_desc
+                        
+                        # Extraer número de cuenta del patrón "CUENTA XXXX"
+                        cuenta_match = re.search(r"CUENTA\s+(\d+)", desc_val)
+                        if cuenta_match:
+                            row_account = cuenta_match.group(1)
+                            should_mark = row_account in filter_accounts
+                
+                if should_mark:
+                    rows_to_mark.append(rn)
 
         if debug_info is not None:
             debug_info["reconciled_set_sample"] = list(reconciled_set)[:10]

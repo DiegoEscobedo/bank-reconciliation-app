@@ -22,6 +22,7 @@ from src.validacion.schema_validator import DataFrameSchemaValidator, SchemaVali
 from src.matching.reconciliation_engine import ReconciliationEngine
 from src.reporting.excel_reporter import ExcelReporter
 from src.utils.logger import get_logger
+from src.utils.amount_utils import clean_amount
 from config.settings import PAPEL_TRABAJO_ACCOUNTS as _PAPEL_TRABAJO_ACCOUNTS
 
 logger = get_logger(__name__)
@@ -139,6 +140,16 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     """
     import pandas as _pd
 
+    mp_color_filter_debug = {
+        "enabled": False,
+        "scotiabank_amounts_count": 0,
+        "scotiabank_amounts_sample": [],
+        "total_mp_rows_before": 0,
+        "total_mp_rows_after": 0,
+        "eligible_colors": [],
+        "colors": [],
+    }
+
     if isinstance(bank_file_path, (str, Path)):
         bank_file_paths = [bank_file_path]
     else:
@@ -155,6 +166,119 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
             reporte_caja_dfs.append(raw)
         else:
             bank_dfs_raw.append(raw)
+
+    # ── Filtro MercadoPago por grupos de color presentes en Scotiabank ─────
+    # Mantiene el matching igual, pero reduce qué registros MP entran al motor:
+    # solo los colores cuyo total (suma por color) exista en montos del banco.
+    mp_raw_dfs = []
+    scotia_amounts = set()
+    for raw_df in bank_dfs_raw:
+        if raw_df.empty or "bank" not in raw_df.columns:
+            continue
+        bname = str(raw_df["bank"].iloc[0]).strip().upper()
+        if bname == "MERCADOPAGO":
+            mp_raw_dfs.append(raw_df)
+        elif bname == "SCOTIABANK":
+            if "raw_deposit" in raw_df.columns:
+                for v in raw_df["raw_deposit"].fillna(""):
+                    amt = round(clean_amount(v), 2)
+                    if amt > 0:
+                        scotia_amounts.add(amt)
+
+    if mp_raw_dfs and scotia_amounts:
+        mp_color_filter_debug["enabled"] = True
+        mp_color_filter_debug["scotiabank_amounts_count"] = len(scotia_amounts)
+        mp_color_filter_debug["scotiabank_amounts_sample"] = sorted(scotia_amounts)[:25]
+        filtered_bank_dfs_raw = []
+        total_mp_before = 0
+        total_mp_after = 0
+        logger.info(
+            "[MP-COLOR-FILTER] Montos Scotiabank detectados (muestra hasta 25): %s",
+            sorted(scotia_amounts)[:25],
+        )
+
+        for raw_df in bank_dfs_raw:
+            if raw_df.empty or "bank" not in raw_df.columns:
+                filtered_bank_dfs_raw.append(raw_df)
+                continue
+
+            bname = str(raw_df["bank"].iloc[0]).strip().upper()
+            if bname != "MERCADOPAGO" or "cell_color" not in raw_df.columns:
+                filtered_bank_dfs_raw.append(raw_df)
+                continue
+
+            mp = raw_df.copy()
+            total_mp_before += len(mp)
+
+            mp["_color_key"] = mp["cell_color"].fillna("").astype(str).str.strip().str.upper()
+            # Para filtro de grupos por banco usamos TOTAL A RECIBIR (depósito neto).
+            # El match con JDE sigue usando COBRO (raw_deposit) dentro del pipeline.
+            if "raw_total_recibir" in mp.columns:
+                mp["_amount_num"] = mp["raw_total_recibir"].fillna("").apply(clean_amount)
+            else:
+                mp["_amount_num"] = mp["raw_deposit"].fillna("").apply(clean_amount)
+            mp = mp[mp["_amount_num"] > 0].copy()
+
+            color_sums = (
+                mp.groupby("_color_key", dropna=False)["_amount_num"]
+                .sum()
+                .round(2)
+            )
+
+            # Logging detallado por color: suma y si hace match contra Scotiabank
+            for color, total in color_sums.items():
+                if not color:
+                    continue
+                row_count = int((mp["_color_key"] == color).sum())
+                has_match = total in scotia_amounts
+                mp_color_filter_debug["colors"].append({
+                    "color": color,
+                    "rows": row_count,
+                    "total": float(total),
+                    "match_scotiabank": bool(has_match),
+                })
+                logger.info(
+                    "[MP-COLOR-FILTER] color=%s | filas=%d | total=%.2f | match_scotiabank=%s",
+                    color,
+                    row_count,
+                    total,
+                    "SI" if has_match else "NO",
+                )
+
+            eligible_colors = {
+                color for color, total in color_sums.items()
+                if color and total in scotia_amounts
+            }
+
+            mp_filtered = mp[mp["_color_key"].isin(eligible_colors)].copy()
+            total_mp_after += len(mp_filtered)
+
+            logger.info(
+                "[MP-COLOR-FILTER] filas MP %d -> %d | colores elegibles=%d | montos Scotiabank=%d",
+                len(raw_df), len(mp_filtered), len(eligible_colors), len(scotia_amounts),
+            )
+            logger.info(
+                "[MP-COLOR-FILTER] colores elegibles: %s",
+                sorted(eligible_colors),
+            )
+            mp_color_filter_debug["eligible_colors"] = sorted(
+                set(mp_color_filter_debug["eligible_colors"]) | set(eligible_colors)
+            )
+
+            mp_filtered = mp_filtered.drop(columns=["_color_key", "_amount_num"], errors="ignore")
+            filtered_bank_dfs_raw.append(mp_filtered)
+
+        bank_dfs_raw = filtered_bank_dfs_raw
+        logger.info(
+            "[MP-COLOR-FILTER] total filas MercadoPago consideradas: %d -> %d",
+            total_mp_before, total_mp_after,
+        )
+        mp_color_filter_debug["total_mp_rows_before"] = int(total_mp_before)
+        mp_color_filter_debug["total_mp_rows_after"] = int(total_mp_after)
+    elif mp_raw_dfs:
+        logger.info(
+            "[MP-COLOR-FILTER] Se detectó MercadoPago pero no Scotiabank; no se aplicó filtro por total de color."
+        )
 
     logger.info("Parseando archivo JDE: %s", jde_file_path)
     jde_raw_df = JDEParser().parse(jde_file_path)
@@ -282,7 +406,7 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     logger.info("Validando schema del DataFrame JDE...")
     DataFrameSchemaValidator.validate_jde_dataframe(jde_df)
 
-    return bank_df, jde_df
+    return bank_df, jde_df, mp_color_filter_debug
 
 
 # ============================================================
@@ -298,7 +422,7 @@ def run_pipeline(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    bank_df, jde_df = _prepare_dataframes(bank_file_path, jde_file_path)
+    bank_df, jde_df, mp_color_filter_debug = _prepare_dataframes(bank_file_path, jde_file_path)
 
     logger.info(
         "Iniciando conciliación: %d movimientos banco | %d movimientos JDE",
@@ -306,6 +430,7 @@ def run_pipeline(
     )
     engine  = ReconciliationEngine()
     results = engine.reconcile(bank_df, jde_df)
+    results["_mp_color_filter_debug"] = mp_color_filter_debug
 
     logger.info("Generando reporte Excel en: %s", output_dir)
     reporter   = ExcelReporter()
@@ -331,7 +456,7 @@ def run_pipeline_stage1(
     El dict devuelto se guarda en session_state y se pasa a
     ``run_pipeline_stage2`` junto con los group_ids aprobados.
     """
-    bank_df, jde_df = _prepare_dataframes(bank_file_path, jde_file_path)
+    bank_df, jde_df, mp_color_filter_debug = _prepare_dataframes(bank_file_path, jde_file_path)
 
     logger.info(
         "Stage 1 — matching exacto + propuesta de agrupaciones: "
@@ -350,6 +475,7 @@ def run_pipeline_stage1(
     interactive_result["_jde_source_path"]   = str(jde_file_path)
     interactive_result["_is_papel_trabajo"]  = is_pt
     interactive_result["_bank_accounts"]     = list(bank_accounts)
+    interactive_result["_mp_color_filter_debug"] = mp_color_filter_debug
 
     if is_pt:
         logger.info("✓ Papel de Trabajo detectado para cuenta(s): %s", bank_accounts)
@@ -416,6 +542,8 @@ def run_pipeline_stage2(
         results["_jde_source_path"] = interactive_result["_jde_source_path"]
     if "_bank_accounts" in interactive_result:
         results["_bank_accounts"] = interactive_result["_bank_accounts"]
+    if "_mp_color_filter_debug" in interactive_result:
+        results["_mp_color_filter_debug"] = interactive_result["_mp_color_filter_debug"]
     
     return results
 

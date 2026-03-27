@@ -517,26 +517,18 @@ if _dl_cols:
             # Usar la fecha más reciente (máxima)
             _fecha_conciliacion = _fechas.max().date()
 
-        # DEBUG OPCIONAL (comentado por defecto) — muestra qué aux_facts se encontraron
-        st.caption(
-            f"🔍 DEBUG write-back: is_papel={results.get('_is_papel_trabajo')} | "
-            f"tiene_bytes={bool(results.get('_jde_bytes'))} | "
-            f"aux_facts ({len(_aux_facts)}): {_aux_facts[:5]} | "
-            f"fecha_conciliacion={_fecha_conciliacion}"
-        )
-
         # Usar bytes guardados (el TemporaryDirectory ya fue destruido)
         _pt_source = results.get("_jde_bytes") or results.get("_jde_source_path", "")
         if _pt_source and _aux_facts:
             try:
                 _reporter = ExcelReporter()
-                _wb_debug: dict = {}
+                _bank_accounts = results.get("_bank_accounts", [])
+                # Extraer últimos 4 dígitos de cada cuenta (bancaria tiene 11, Papel tiene 4)
+                _bank_accounts_last4 = [acct[-4:] for acct in _bank_accounts]
                 _pt_bytes = _reporter.write_back_conciliados(
-                    _pt_source, _aux_facts, match_date=_fecha_conciliacion, debug_info=_wb_debug
+                    _pt_source, _aux_facts, match_date=_fecha_conciliacion, 
+                    filter_accounts=_bank_accounts_last4
                 )
-                # DEBUG OPCIONAL (comentado por defecto) — muestra detalles del write-back
-                with st.expander("🔬 Debug interno write_back", expanded=False):
-                    st.write(_wb_debug)
                 with _dl_buttons[_btn_idx]:
                     # Usar la fecha elegida por el usuario o la de hoy
                     fecha_archivo = _fecha_descarga.strftime("%d-%m-%Y") if _fecha_descarga else datetime.now().strftime("%d-%m-%Y")
@@ -586,6 +578,39 @@ if _all_diffs:
         delta=f"{_n_with_diff} match(es) con diferencia" if _n_with_diff else "Todos exactos al centavo",
         delta_color=_color,
     )
+
+# ── Debug pequeño: filtro MercadoPago por color ─────────────────
+_mp_dbg = results.get("_mp_color_filter_debug") or {}
+if _mp_dbg.get("enabled"):
+    st.caption(
+        "🔎 MP color-filter: "
+        f"filas {int(_mp_dbg.get('total_mp_rows_before', 0))} → {int(_mp_dbg.get('total_mp_rows_after', 0))} | "
+        f"colores elegibles={len(_mp_dbg.get('eligible_colors', []))} | "
+        f"montos Scotiabank={int(_mp_dbg.get('scotiabank_amounts_count', 0))}"
+    )
+    with st.expander("Ver detalle filtro MercadoPago", expanded=False):
+        _colors = _mp_dbg.get("colors", [])
+        if _colors:
+            _df_colors = pd.DataFrame(_colors)
+            _df_colors["Grupo #"] = range(1, len(_df_colors) + 1)
+            _df_colors["Filas"] = _df_colors["rows"].fillna(0).astype(int)
+            _df_colors["Total"] = pd.to_numeric(_df_colors["total"], errors="coerce").fillna(0.0)
+            _df_colors["Match en Scotiabank"] = _df_colors["match_scotiabank"].apply(
+                lambda v: "✅" if bool(v) else "❌"
+            )
+
+            _df_colors = _df_colors[["Grupo #", "Filas", "Total", "Match en Scotiabank"]]
+            st.dataframe(
+                _df_colors.style.format({"Total": "{:,.2f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No hubo grupos de color para analizar.")
+        st.caption(
+            "Montos Scotiabank (muestra): "
+            + ", ".join(str(v) for v in _mp_dbg.get("scotiabank_amounts_sample", []))
+        )
 
 st.markdown("---")
 
