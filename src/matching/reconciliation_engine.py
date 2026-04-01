@@ -5,9 +5,12 @@ import pandas as pd
 from config.settings import (
     AMOUNT_TOLERANCE,
     DATE_TOLERANCE_DAYS,
+    GROUPED_CANDIDATE_LIMIT,
     MAX_GROUP_SIZE,
-    ROUND_DECIMALS
+    ROUND_DECIMALS,
+    TIPO_BANCO_TO_JDE_COMPAT,
 )
+from src.matching.grouped_matcher import GroupedMatcher
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -25,22 +28,19 @@ class ReconciliationEngine:
     montos para reducir falsos positivos.
     """
 
-    # Mapeo tipo banco → set de tipos JDE compatibles
-    # TPV mezcla TDD(28) y TDC(04); TR=transferencia(03); 03 a veces es efectivo
-    _TIPO_MAP: dict = {
-        "TPV": {"28", "04"},
-        "TR":  {"03"},
-        "03":  {"01", "03"},
-        "01":  {"01"},
-        "04":  {"04"},
-        "28":  {"28"},
-    }
+    # Mapeo tipo banco → set de tipos JDE compatibles (centralizado en settings)
+    _TIPO_MAP: dict = TIPO_BANCO_TO_JDE_COMPAT
 
     def __init__(self):
         self.amount_tolerance = AMOUNT_TOLERANCE
         self.date_tolerance_days = DATE_TOLERANCE_DAYS
         self.maximum_group_size = MAX_GROUP_SIZE
+        self.grouped_candidate_limit = GROUPED_CANDIDATE_LIMIT
+        # Reglas globales de agrupacion
+        self.enforce_grouped_strict_tienda = True
+        self.forward_grouped_min_size = 2
         self.rounding_decimals = ROUND_DECIMALS
+        self.grouped_matcher = GroupedMatcher(self)
 
     # ============================================================
     # MÉTODO PÚBLICO PRINCIPAL
@@ -312,7 +312,10 @@ class ReconciliationEngine:
         try:
             _raw = bank_row.get("tienda") if hasattr(bank_row, "get") else bank_row["tienda"]
             # pd.isna cubre float('nan'), None, pd.NA, pd.NaT
-            if not pd.isna(_raw) and str(_raw).strip().upper() not in ("", "NAN", "NONE", "NA", "<NA>"):
+            # NO ENCONTRADO se trata como "sin tienda".
+            if not pd.isna(_raw) and str(_raw).strip().upper() not in (
+                "", "NAN", "NONE", "NA", "<NA>", "NO ENCONTRADO"
+            ):
                 bank_tienda = str(_raw).strip().upper()
         except (KeyError, TypeError):
             pass
@@ -375,6 +378,24 @@ class ReconciliationEngine:
 
     # Palabras que identifican un movimiento de comisión en la descripción
     _COMISION_RE = re.compile(r"comisi[oó]n|comision", re.IGNORECASE)
+
+    @staticmethod
+    def _normalize_account_token(value) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value).strip().replace(" ", "")
+
+    @classmethod
+    def _accounts_compatible(cls, bank_account, jde_account) -> bool:
+        """
+        Compatibilidad cuenta larga/corta por sufijo (ej. 20305077133 vs 7133).
+        Si alguno viene vacío, no bloquea el matching.
+        """
+        b = cls._normalize_account_token(bank_account)
+        j = cls._normalize_account_token(jde_account)
+        if not b or not j:
+            return True
+        return b == j or b.endswith(j) or j.endswith(b)
 
     @classmethod
     def _es_comision(cls, description: str) -> bool:
@@ -451,6 +472,12 @@ class ReconciliationEngine:
                 ))
             ]
 
+            # Evitar cruces por monto absoluto entre deposito/retiro.
+            if "movement_type" in potential_jde_candidates.columns:
+                potential_jde_candidates = potential_jde_candidates[
+                    potential_jde_candidates["movement_type"] == bank_row.get("movement_type")
+                ]
+
             if potential_jde_candidates.empty:
                 logger.warning(
                     "[EXACT] Banco idx=%d  amt=%.2f  fecha=%s -> 0 candidatos JDE por fecha (tolerancia=%d dias)",
@@ -468,12 +495,23 @@ class ReconciliationEngine:
                 potential_jde_candidates, bank_row
             )
 
+            # Si ambos lados tienen cuenta, exigir compatibilidad por cuenta/sufijo.
+            if "account_id" in potential_jde_candidates.columns:
+                bank_account = bank_row.get("account_id")
+                potential_jde_candidates = potential_jde_candidates[
+                    potential_jde_candidates["account_id"].apply(
+                        lambda jde_acc: self._accounts_compatible(bank_account, jde_acc)
+                    )
+                ]
+
             # EXACT MATCH: Validación OBLIGATORIA de tienda
             # Si existe tienda en banco O JDE, DEBEN coincidir exactamente
             bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
+            if bank_tienda == "NO ENCONTRADO":
+                bank_tienda = ""
             if "tienda" in potential_jde_candidates.columns:
                 potential_jde_candidates["jde_tienda"] = (
-                    potential_jde_candidates["tienda"].str.strip().str.upper()
+                    potential_jde_candidates["tienda"].fillna("").astype(str).str.strip().str.upper()
                 )
                 # Si banco tiene tienda, solo exacto match
                 if bank_tienda:
@@ -481,10 +519,10 @@ class ReconciliationEngine:
                         potential_jde_candidates["jde_tienda"] == bank_tienda
                     ]
                 else:
-                    # Si banco NO tiene tienda, rechaza JDE con tienda definida
-                    # (previene matches ambiguos de tiendas desconocidas)
+                    # Si banco NO tiene tienda, solo aceptar JDE sin tienda
+                    # o con marcador explícito de no-encontrado.
                     potential_jde_candidates = potential_jde_candidates[
-                        potential_jde_candidates["jde_tienda"] == ""
+                        potential_jde_candidates["jde_tienda"].isin(["", "NO ENCONTRADO"])
                     ]
                 potential_jde_candidates = potential_jde_candidates.drop(columns=["jde_tienda"])
 
@@ -524,169 +562,10 @@ class ReconciliationEngine:
     # ============================================================
 
     def _propose_grouped_matches(self, bank_dataframe, jde_dataframe):
-        """
-        Genera propuestas de agrupación en DOS FASES para evitar que el
-        orden de procesamiento cause que un movimiento bancario "consuma"
-        registros JDE que otro necesita con mayor precisión.
-
-        FASE 1 — Exploración global (sin reservar):
-            Para cada movimiento bancario pendiente busca el mejor subconjunto
-            JDE posible ignorando conflictos. Se obtiene una propuesta
-            candidata por banco.
-
-        FASE 2 — Resolución de conflictos:
-            Ordena todas las propuestas por precisión (menor diferencia de
-            monto → mayor prioridad). Acepta en orden; si una propuesta
-            comparte índices JDE con otra ya aceptada, intenta encontrar
-            un subconjunto alternativo usando solo los JDE aún disponibles.
-            Así ambos movimientos bancarios tienen la misma oportunidad de
-            quedar conciliados.
-
-        NO marca ``is_matched`` — eso lo hace ``confirm_grouped_matches``.
-        """
-
-        # ── FASE 1: exploración global sin reservar ──────────────────────
-        raw_proposals: list = []
-
-        for bank_index, bank_row in bank_dataframe.iterrows():
-
-            if bank_row["is_matched"]:
-                continue
-
-            target_amount = round(bank_row["abs_amount"], self.rounding_decimals)
-            bank_date     = bank_row["movement_date"]
-
-            available_jde = jde_dataframe[
-                (jde_dataframe["is_matched"] == False)
-                & (self._is_date_within_tolerance(
-                    bank_date, jde_dataframe["movement_date"]
-                ))
-            ]
-
-            if available_jde.empty:
-                continue
-
-            available_jde = self._filter_by_tienda(
-                available_jde, bank_row, jde_dataframe
-            )
-
-            if available_jde.empty:
-                continue
-
-            # Refinar por comisión (simétrico)
-            available_jde = self._filter_by_comision(available_jde, bank_row)
-
-            if available_jde.empty:
-                continue
-
-            filtered = available_jde[
-                available_jde["abs_amount"] <= target_amount + self.amount_tolerance
-            ].copy()
-
-            if filtered.empty:
-                continue
-
-            subset_result = self._try_subsets_per_tienda(filtered, target_amount)
-
-            if not subset_result:
-                continue
-
-            matched_jde_indices = [idx for idx, _ in subset_result]
-            accumulated = round(
-                sum(round(r["abs_amount"], self.rounding_decimals)
-                    for _, r in subset_result),
-                self.rounding_decimals,
-            )
-
-            raw_proposals.append({
-                "bank_row_index":    bank_index,
-                "bank_snapshot":     bank_row.to_dict(),
-                "jde_row_indices":   matched_jde_indices,
-                "jde_snapshots":     [row.to_dict() for _, row in subset_result],
-                "amount_difference": round(target_amount - accumulated,
-                                           self.rounding_decimals),
-                "jde_count":         len(matched_jde_indices),
-            })
-
-        # ── FASE 2: resolución de conflictos ─────────────────────────────
-        # Prioridad: menor |diferencia de monto|, en empate menos registros JDE
-        raw_proposals.sort(
-            key=lambda p: (abs(p["amount_difference"]), p["jde_count"])
+        return self.grouped_matcher.propose_grouped_matches(
+            bank_dataframe,
+            jde_dataframe,
         )
-
-        reserved_jde: set  = set()
-        final_proposals: list = []
-        group_id: int      = 0
-
-        for proposal in raw_proposals:
-            jde_set = set(proposal["jde_row_indices"])
-
-            if jde_set.isdisjoint(reserved_jde):
-                # Sin conflicto → aceptar directamente
-                reserved_jde.update(jde_set)
-                proposal["group_id"] = group_id
-                final_proposals.append(proposal)
-                group_id += 1
-            else:
-                # Conflicto → reintentar con solo los JDE disponibles
-                bank_index    = proposal["bank_row_index"]
-                bank_row      = bank_dataframe.loc[bank_index]
-                target_amount = round(bank_row["abs_amount"], self.rounding_decimals)
-                bank_date     = bank_row["movement_date"]
-
-                alt_jde = jde_dataframe[
-                    (~jde_dataframe.index.isin(reserved_jde))
-                    & (jde_dataframe["is_matched"] == False)
-                    & (self._is_date_within_tolerance(
-                        bank_date, jde_dataframe["movement_date"]
-                    ))
-                ]
-
-                if alt_jde.empty:
-                    continue
-
-                alt_jde = self._filter_by_tienda(
-                    alt_jde, bank_row, jde_dataframe
-                )
-
-                # Refinar por comisión (simétrico)
-                alt_jde = self._filter_by_comision(alt_jde, bank_row)
-
-                alt_filtered = alt_jde[
-                    alt_jde["abs_amount"] <= target_amount + self.amount_tolerance
-                ].copy()
-
-                if alt_filtered.empty:
-                    continue
-
-                alt_result = self._try_subsets_per_tienda(
-                    alt_filtered, target_amount
-                )
-
-                if not alt_result:
-                    continue
-
-                alt_indices = [idx for idx, _ in alt_result]
-                reserved_jde.update(alt_indices)
-                alt_accumulated = round(
-                    sum(round(r["abs_amount"], self.rounding_decimals)
-                        for _, r in alt_result),
-                    self.rounding_decimals,
-                )
-
-                final_proposals.append({
-                    "group_id":          group_id,
-                    "bank_row_index":    bank_index,
-                    "bank_snapshot":     bank_row.to_dict(),
-                    "jde_row_indices":   alt_indices,
-                    "jde_snapshots":     [row.to_dict() for _, row in alt_result],
-                    "amount_difference": round(target_amount - alt_accumulated,
-                                               self.rounding_decimals),
-                    "jde_count":         len(alt_indices),
-                })
-                group_id += 1
-
-        return final_proposals
 
     # ============================================================
     # SUBSET SUM POR TIENDA — garantiza homogeneidad en grupos
@@ -697,69 +576,10 @@ class ReconciliationEngine:
         filtered_candidates: "pd.DataFrame",
         target_amount: float,
     ) -> "list | None":
-        """
-        Intenta encontrar el mejor subset sum garantizando que todos los
-        registros JDE del grupo pertenezcan a la MISMA tienda.
-
-        Si los candidatos no tienen columna ``tienda`` o todos son de la
-        misma tienda, se comporta igual que ``_find_subset_sum_with_limit``
-        directamente.  Si hay varias tiendas, prueba cada una por separado
-        y devuelve el resultado con menor diferencia de monto absoluta.
-        """
-        has_tienda = (
-            "tienda" in filtered_candidates.columns
-            and filtered_candidates["tienda"].notna().any()
-            and (filtered_candidates["tienda"].str.strip() != "").any()
+        return self.grouped_matcher.try_subsets_per_tienda(
+            filtered_candidates,
+            target_amount,
         )
-
-        if not has_tienda:
-            # Sin info de tienda → comportamiento original
-            candidate_rows = list(
-                filtered_candidates.nsmallest(25, "abs_amount").iterrows()
-            )
-            return self._find_subset_sum_with_limit(candidate_rows, target_amount)
-
-        # Obtener tiendas únicas presentes en los candidatos
-        tiendas = (
-            filtered_candidates["tienda"]
-            .str.strip()
-            .replace("", pd.NA)
-            .dropna()
-            .unique()
-        )
-
-        if len(tiendas) <= 1:
-            # Una sola tienda → sin riesgo de mezcla, camino directo
-            candidate_rows = list(
-                filtered_candidates.nsmallest(25, "abs_amount").iterrows()
-            )
-            return self._find_subset_sum_with_limit(candidate_rows, target_amount)
-
-        # Múltiples tiendas → probar cada una y conservar el mejor resultado
-        best_result = None
-        best_diff   = float("inf")
-
-        for tienda in tiendas:
-            grupo = filtered_candidates[
-                filtered_candidates["tienda"].str.strip() == tienda
-            ]
-            candidate_rows = list(grupo.nsmallest(25, "abs_amount").iterrows())
-            result = self._find_subset_sum_with_limit(candidate_rows, target_amount)
-            if result is None:
-                continue
-            accumulated = round(
-                sum(
-                    round(r["abs_amount"], self.rounding_decimals)
-                    for _, r in result
-                ),
-                self.rounding_decimals,
-            )
-            diff = abs(target_amount - accumulated)
-            if diff < best_diff:
-                best_diff   = diff
-                best_result = result
-
-        return best_result
 
     # ============================================================
     # AGRUPACIÓN INVERSA — N banco → 1 JDE
@@ -772,98 +592,12 @@ class ReconciliationEngine:
         forward_proposals: list,
         start_group_id: int = 10000,
     ) -> list:
-        """
-        Para cada movimiento JDE pendiente, busca un subconjunto de
-        movimientos bancarios pendientes cuya SUMA iguale el monto JDE
-        (dentro de la tolerancia). Solo aplica cuando se necesitan 2+
-        movimientos bancarios (si fuera 1, el matching exacto ya lo cubriría).
-
-        Caso típico: varias comisiones bancarias separadas (−10, −5, −1.60, −0.80)
-        que juntas suman la comisión registrada en JDE (−17.40).
-        """
-        # Bank rows reclamados por propuestas forward (para evitar doble uso)
-        claimed_bank = {p["bank_row_index"] for p in forward_proposals}
-
-        proposals: list = []
-        group_id = start_group_id
-
-        for jde_index, jde_row in jde_dataframe.iterrows():
-            if jde_row["is_matched"]:
-                continue
-
-            target_amount = round(jde_row["abs_amount"], self.rounding_decimals)
-            jde_date      = jde_row["movement_date"]
-            jde_mvtype    = jde_row.get("movement_type", "")
-
-            # Candidatos bancarios: pendientes, mismo tipo, dentro de fecha,
-            # cada uno menor que el total JDE (si fuera igual, exacto ya matcheó)
-            available_bank = bank_dataframe[
-                (~bank_dataframe["is_matched"])
-                & (~bank_dataframe.index.isin(claimed_bank))
-                & (self._is_date_within_tolerance(jde_date, bank_dataframe["movement_date"]))
-                & (bank_dataframe["movement_type"] == jde_mvtype)
-                & (bank_dataframe["abs_amount"] < target_amount - self.amount_tolerance)
-            ].copy()
-
-            if len(available_bank) < 2:
-                continue
-
-            # ── Filtro de tienda: los movimientos bancarios deben pertenecer
-            # a la misma tienda que el registro JDE.
-            # Si el JDE no tiene tienda, o el banco no tiene la columna,
-            # se deja pasar (sin info no se puede discriminar).
-            jde_tienda = ""
-            try:
-                _t = jde_row.get("tienda") if hasattr(jde_row, "get") else jde_row["tienda"]
-                if not pd.isna(_t) and str(_t).strip().upper() not in ("", "NAN", "NONE", "NA", "<NA>"):
-                    jde_tienda = str(_t).strip().upper()
-            except (KeyError, TypeError):
-                pass
-
-            if jde_tienda and "tienda" in available_bank.columns:
-                bank_tienda_upper = available_bank["tienda"].fillna("").str.strip().str.upper()
-                # Aceptar filas cuya tienda coincida con JDE o no tengan tienda asignada
-                available_bank = available_bank[
-                    (bank_tienda_upper == jde_tienda) | (bank_tienda_upper == "")
-                ].copy()
-
-            if len(available_bank) < 2:
-                continue
-
-            candidate_rows = list(
-                available_bank.nsmallest(25, "abs_amount").iterrows()
-            )
-            result = self._find_subset_sum_with_limit(candidate_rows, target_amount)
-
-            if result is None or len(result) < 2:
-                continue
-
-            bank_indices = [idx for idx, _ in result]
-            accumulated  = round(
-                sum(round(r["abs_amount"], self.rounding_decimals) for _, r in result),
-                self.rounding_decimals,
-            )
-            diff = round(target_amount - accumulated, self.rounding_decimals)
-
-            # Marcar como reclamados para evitar solapamientos dentro de esta fase
-            claimed_bank.update(bank_indices)
-
-            proposals.append({
-                "group_id":          group_id,
-                "jde_row_index":     jde_index,
-                "jde_snapshot":      jde_row.to_dict(),
-                "bank_row_indices":  bank_indices,
-                "bank_snapshots":    [r.to_dict() for _, r in result],
-                "amount_difference": diff,
-                "bank_count":        len(bank_indices),
-            })
-            group_id += 1
-            logger.info(
-                "[REV-GROUPED] JDE idx=%d  amt=%.2f -> %d filas banco  diff=%.2f",
-                jde_index, target_amount, len(bank_indices), diff,
-            )
-
-        return proposals
+        return self.grouped_matcher.propose_reverse_grouped_matches(
+            bank_dataframe,
+            jde_dataframe,
+            forward_proposals,
+            start_group_id=start_group_id,
+        )
 
     # ============================================================
     # COLOR-BASED MATCHING (Mercado Pago)
@@ -1034,77 +768,10 @@ class ReconciliationEngine:
     # ============================================================
 
     def _find_subset_sum_with_limit(self, candidate_rows, target_amount):
-        """
-        Encuentra un subconjunto de candidate_rows cuya suma sea lo más
-        cercano posible al target_amount (dentro de tolerancia).
-        
-        Estrategia: busca la solución MEJOR (más montos incluidos, menor
-        diferencia) en lugar de retornar la PRIMERA solución encontrada.
-        Esto evita casos donde se ignoran centavos pequeños innecesariamente.
-        """
-        # Ordenar ascendente: los montos más pequeños primero → maximiza inclusión
-        sorted_candidates = sorted(
+        return self.grouped_matcher.find_subset_sum_with_limit(
             candidate_rows,
-            key=lambda row: round(
-                row[1]["abs_amount"],
-                self.rounding_decimals
-            ),
-            reverse=False,  # ← MENOR a MAYOR (para preferir incluir más montos)
+            target_amount,
         )
-
-        # Suma de sufijos para poda adicional
-        amounts = [round(r[1]["abs_amount"], self.rounding_decimals) for r in sorted_candidates]
-        suffix_sums = [0.0] * (len(amounts) + 1)
-        for i in range(len(amounts) - 1, -1, -1):
-            suffix_sums[i] = suffix_sums[i + 1] + amounts[i]
-
-        best_result = None
-        best_diff = float('inf')
-
-        def backtracking_search(
-                start_position,
-                current_combination,
-                current_sum):
-            nonlocal best_result, best_diff
-
-            if len(current_combination) > self.maximum_group_size:
-                return
-
-            current_diff = abs(round(current_sum - target_amount, self.rounding_decimals))
-
-            # Si esta solución es mejor (menor diferencia, o misma diferencia pero más montos)
-            if current_diff <= self.amount_tolerance:
-                if (current_diff < best_diff or 
-                    (current_diff == best_diff and len(current_combination) > len(best_result or []))):
-                    best_diff = current_diff
-                    best_result = current_combination
-
-            if current_sum > target_amount + self.amount_tolerance:
-                return
-
-            # Poda: ni sumando todo lo que queda podemos alcanzar el target
-            remaining = target_amount - current_sum
-            if suffix_sums[start_position] < remaining - self.amount_tolerance:
-                return
-
-            for index in range(start_position, len(sorted_candidates)):
-
-                jde_index, jde_row = sorted_candidates[index]
-
-                movement_amount = round(
-                    jde_row["abs_amount"],
-                    self.rounding_decimals
-                )
-
-                backtracking_search(
-                    index + 1,
-                    current_combination + [(jde_index, jde_row)],
-                    round(current_sum + movement_amount,
-                          self.rounding_decimals)
-                )
-
-        backtracking_search(0, [], 0)
-        return best_result
 
     # ============================================================
     # FUNCIONES AUXILIARES

@@ -49,6 +49,7 @@ st.markdown("""
     .metric-card p  { margin: 0; font-size: 0.85rem; color: #555; }
     .pending-warning { color: #C00000; font-weight: bold; }
     .match-ok        { color: #1F6B28; font-weight: bold; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -297,7 +298,7 @@ if st.session_state.get("phase") == "validating":
                         "Tipo":        _safe(bank_snap, "tipo_banco",
                                              _safe(bank_snap, "movement_type")),
                     }]).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -316,7 +317,7 @@ if st.session_state.get("phase") == "validating":
                     })
                 st.dataframe(
                     pd.DataFrame(jde_rows).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -367,7 +368,7 @@ if st.session_state.get("phase") == "validating":
                     })
                 st.dataframe(
                     pd.DataFrame(bank_rows).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -383,7 +384,7 @@ if st.session_state.get("phase") == "validating":
                         "Tipo":        _safe(jde_snap, "tipo_jde",
                                              _safe(jde_snap, "movement_type")),
                     }]).style.format({"Monto": "{:,.2f}"}),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -602,7 +603,7 @@ if _mp_dbg.get("enabled"):
             _df_colors = _df_colors[["Grupo #", "Filas", "Total", "Match en Scotiabank"]]
             st.dataframe(
                 _df_colors.style.format({"Total": "{:,.2f}"}),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -720,6 +721,10 @@ with tab_historicos:
 
             st.markdown("---")
 
+            # Modo estricto fijo: el cruce histórico siempre exige misma cuenta
+            # (con compatibilidad cuenta corta/larga por sufijo).
+            _hist_strict_account = True
+
             # Cruzar contra el período actual
             with st.spinner("Cruzando pendientes históricos con el período actual…"):
                 matched_df = match_historical_pendientes(
@@ -728,6 +733,7 @@ with tab_historicos:
                     conciliated_jde=results.get("conciliated_jde_movements"),
                     pending_bank=results.get("pending_bank_movements"),
                     pending_jde=results.get("pending_jde_movements"),
+                    require_same_account=_hist_strict_account,
                 )
 
             stats = summarize_historical_matches(matched_df)

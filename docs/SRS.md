@@ -3,11 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.2 |
-| Fecha | 26/03/2026 |
+| Versión | 1.3 |
+| Fecha | 30/03/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
-| Cambios | Adición de Scotiabank, Mercado Pago; Papel de Trabajo para 7133; Fecha conciliación automática |
+| Cambios | Histórico estricto por cuenta, filtro MercadoPago por grupos de color, write-back con aislamiento por cuenta |
 
 ---
 
@@ -25,7 +25,8 @@ El sistema permite:
 - Revisar y aprobar agrupaciones propuestas de manera interactiva.
 - Generar un reporte Excel con los resultados clasificados.
 - Marcar como conciliadas las filas correspondientes en el Papel de Trabajo original (cuentas 6614 y 7133).
-- Filtrar automáticamente filas grises de Mercado Pago (headers de transacciones).
+- Aplicar filtro previo para Mercado Pago por grupos de color cuyo total exista en Scotiabank.
+- Ejecutar análisis histórico de pendientes en modo solo lectura.
 
 ### 1.3 Definiciones y acrónimos
 
@@ -100,7 +101,7 @@ El sistema es una aplicación standalone Python que opera en dos modos:
   - Variaciones en capitalización
 - **Casos especiales:**
   - **Scotiabank**: Valida que tenga al menos 14 columnas; si faltan columnas, usa Series vacíos sin crashear.
-  - **Mercado Pago**: Filtra automáticamente filas con color gris (R=G=B en formato hex AARRGGBB) para descartarheaders de transacciones.
+  - **Mercado Pago**: Conserva filas con estado `Aprobado`/`Aprovado`; usa `COBRO` para match contra JDE y `TOTAL A RECIBIR` para agrupación por color contra Scotiabank.
   - **NetPay**: Detecta por presencia de columnas específicas (Sucursal, Empleado, etc).
 - Si se carga un REPORTE CAJA junto con el estado de cuenta, lo usa para enriquecer los movimientos bancarios con los campos `tienda` y `tipo_pago`.
 - Si solo se carga un REPORTE CAJA (sin estado de cuenta), lo usa como fuente bancaria.
@@ -196,34 +197,11 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - Solo se consideran movimientos no matcheados en la fase exacta.
 - El tamaño máximo del grupo es `MAX_GROUP_SIZE` (10 por defecto).
 - La diferencia entre el monto bancario y la suma del grupo debe ser ≤ `AMOUNT_TOLERANCE`.
-- Las agrupaciones se presentan como **propuestas**; el usuario las aprueba o rechaza antes de confirmar.
-
----
-
-### RF-07 — Matching agrupado
-
-**Descripción:** El motor debe proponer agrupaciones donde la suma de N movimientos JDE (N ≤ `MAX_GROUP_SIZE`) se aproxima al monto de un movimiento bancario pendiente.
-
-**Criterios de aceptación:**
-- Solo se consideran movimientos no matcheados en la fase exacta.
-- El tamaño máximo del grupo es `MAX_GROUP_SIZE` (10 por defecto).
-- La diferencia entre el monto bancario y la suma del grupo debe ser ≤ `AMOUNT_TOLERANCE`.
 - **Durante la búsqueda de agrupaciones:** Mayor flexibilidad para explorar posibilidades.
 - **Al confirmar:**
   - Validación de tienda: Si TODOS los JDE de la agrupación son de UNA tienda diferente a la tienda del banco → RECHAZA automáticamente (previene falsos positivos).
   - Si bancos o JDE carecen de tienda, se aceptan sin restricción.
 - Las agrupaciones se presentan como **propuestas**; el usuario las aprueba o rechaza antes de confirmar.
-
----
-
-### RF-08 — Revisión interactiva de agrupaciones (modo Streamlit)
-
-**Descripción:** El usuario debe poder revisar cada agrupación propuesta y aprobarla o rechazarla individualmente.
-
-**Criterios de aceptación:**
-- La UI muestra cada grupo con: monto bancario, movimientos JDE del grupo, diferencia y tienda (si aplica).
-- El usuario puede seleccionar / deseleccionar grupos con un checkbox.
-- Solo los grupos aprobados se incluyen en el resultado final.
 
 ---
 
@@ -245,40 +223,11 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 
 **Criterios de aceptación:**
 - El archivo contiene 4 hojas: **Resumen**, **Conciliados**, **Pendientes Banco**, **Pendientes JDE**.
-- **Resumen** incluye: total de movimientos banco y JDE, conteo de matches exactos y agrupados, conteo de pendientes.
+- **Resumen** incluye: total de movimientos banco y JDE, conteo de matches exactos y agrupados (incluyendo inversos), conteo de pendientes.
 - **Conciliados** incluye por cada match: tipo (Exacto/Agrupado), datos banco, datos JDE, diferencia.
 - **Pendientes** muestran los movimientos sin match con todos sus campos.
 - El archivo tiene formato visual: encabezados con color, filas alternas, formatos de fecha y moneda.
 - El nombre del archivo incluye timestamp: `conciliacion_YYYYMMDD_HHMMSS.xlsx`.
-
----
-
-### RF-09 — Generación de reporte Excel
-
-**Descripción:** El sistema debe generar un archivo Excel con los resultados de la conciliación.
-
-**Criterios de aceptación:**
-- El archivo contiene 5 hojas: **Resumen**, **Exactos**, **Agrupados**, **Agrupados Inversos**, **Pendientes Banco**, **Pendientes JDE**.
-- **Resumen** incluye: total de movimientos banco y JDE, conteo de matches exactos, agrupados, agrupados inversos, conteo de pendientes.
-- **Exactos** incluye: datos banco, datos JDE, diferencia.
-- **Agrupados** incluye: monto banco, cantidad de JDE agrupados, JDE incluidos, diferencia.
-- **Agrupados Inversos** incluye: cantidad de banco agrupados, monto JDE final, banco incluidos, diferencia.
-- **Pendientes** muestran los movimientos banco/JDE sin match con todos sus campos.
-- El archivo tiene formato visual: encabezados con color, filas alternas, formatos de fecha y moneda.
-- El nombre del archivo incluye timestamp: `conciliacion_YYYYMMDD_HHMMSS.xlsx`.
-
----
-
-### RF-10 — Write-back al Papel de Trabajo
-
-**Descripción:** El sistema debe poder marcar como conciliadas las filas correspondientes en el Papel de Trabajo original del usuario.
-
-**Criterios de aceptación:**
-- Localiza automáticamente la hoja `AUX CONTABLE` en el archivo original.
-- Identifica las columnas `CONCILIADO` y `FECHA CONCILIACION` por nombre (no por posición).
-- Escribe `"Sí"` en `CONCILIADO` y la fecha del proceso en `FECHA CONCILIACION` para cada `Aux_Fact` conciliado.
-- El resto del archivo (fórmulas, formatos, otras hojas) permanece intacto.
-- El archivo modificado se entrega como descarga en bytes (sin sobreescribir el original directamente).
 
 ---
 
@@ -292,6 +241,8 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - Identifica las columnas `CONCILIADO` y `FECHA CONCILIACION` por nombre (no por posición).
 - Escribe `"Sí"` en `CONCILIADO` y la fecha más reciente de los movimientos bancarios conciliados en `FECHA CONCILIACION` para cada `Aux_Fact` conciliado.
 - La fecha de conciliación es automáticamente la más reciente del banco (no la fecha de ejecución).
+- Aplica aislamiento por cuenta: solo marca filas del Papel cuya cuenta (`CUENTA XXXX`) coincide con las cuentas del banco en conciliación.
+- Para cuentas bancarias largas, compara por sufijo (últimos 4 dígitos) contra cuenta corta del Papel.
 - El resto del archivo (fórmulas, formatos, otras hojas) permanece intacto.
 - El archivo modificado se entrega como descarga en bytes (sin sobreescribir el original directamente).
 
@@ -306,6 +257,19 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - `--bank` acepta una o varias rutas de archivo.
 - Imprime un resumen en consola al finalizar.
 - Termina con código de salida `1` ante errores de validación o archivo no encontrado.
+
+---
+
+### RF-12 — Análisis histórico de pendientes (solo lectura)
+
+**Descripción:** El sistema debe permitir cargar una conciliación anterior y cruzar sus pendientes contra el período actual para clasificar su estatus.
+
+**Criterios de aceptación:**
+- Parsea pendientes históricos por sección (`mas`, `menos`) desde el archivo de conciliación anterior.
+- Cruza cada pendiente por monto y fecha contra: conciliados banco/JDE y pendientes banco/JDE del período actual.
+- Exige misma cuenta en el cruce histórico (modo estricto fijo), aceptando equivalencia por sufijo para cuenta larga/corta.
+- Clasifica en `CONCILIADO`, `PENDIENTE_BANCO`, `PENDIENTE_JDE`, `AUN_PENDIENTE`.
+- No modifica la conciliación del período actual ni ejecuta write-back; solo muestra métricas/tablas y permite descarga del análisis.
 
 ---
 
@@ -371,7 +335,9 @@ Los parsers y motor de matching deben tolerar:
 
 ### 6.4 Estado de cuenta bancario (Mercado Pago)
 - Formato Excel
-- Filas con color gris (R=G=B) son automáticamente descartadas
+- Filas válidas: estado `Aprobado` o `Aprovado`
+- Monto para conciliación con JDE: columna `COBRO`
+- Monto para agrupación por color vs Scotiabank: columna `TOTAL A RECIBIR`
 
 ### 6.5 Nómina (NetPay)
 - Formato Excel

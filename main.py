@@ -23,9 +23,50 @@ from src.matching.reconciliation_engine import ReconciliationEngine
 from src.reporting.excel_reporter import ExcelReporter
 from src.utils.logger import get_logger
 from src.utils.amount_utils import clean_amount
-from config.settings import PAPEL_TRABAJO_ACCOUNTS as _PAPEL_TRABAJO_ACCOUNTS
+from config.settings import (
+    DATE_TOLERANCE_DAYS as _DATE_TOLERANCE_DAYS,
+    PAPEL_TRABAJO_ACCOUNTS as _PAPEL_TRABAJO_ACCOUNTS,
+)
 
 logger = get_logger(__name__)
+
+
+# ============================================================
+# PERFIL DE CONCILIACION POR CUENTA
+# ============================================================
+
+def _normalize_account_token(value: object) -> str:
+    return str(value or "").strip().replace(" ", "")
+
+
+def _account_set_has_suffix(accounts: set[str], suffix: str) -> bool:
+    for acct in accounts:
+        a = _normalize_account_token(acct)
+        if a == suffix or a.endswith(suffix):
+            return True
+    return False
+
+
+def _configure_engine_for_accounts(engine: ReconciliationEngine, bank_accounts: set[str]) -> str:
+    """
+    Ajusta el perfil del motor por cuenta bancaria.
+    Reglas solicitadas: los cambios de optimizacion/reglas estrictas de hoy
+    aplican SOLO para la cuenta 6614.
+    """
+    has_6614 = _account_set_has_suffix(bank_accounts, "6614")
+
+    if has_6614:
+        # Modo rapido: reduce espacio combinatorio para respuesta mas agil.
+        engine.grouped_candidate_limit = 12
+        mode = "6614-rapido"
+    else:
+        mode = "default"
+
+    logger.info(
+        "[ENGINE-MODE] cuentas=%s | modo=%s | grouped_candidate_limit=%d | max_group_size=%d",
+        sorted(bank_accounts), mode, engine.grouped_candidate_limit, engine.maximum_group_size,
+    )
+    return mode
 
 
 # ============================================================
@@ -82,47 +123,84 @@ def _enrich_bank_with_reporte(bank_df, reporte_df):
     if reporte_df.empty or "tienda" not in reporte_df.columns:
         return bank_df
 
-    # Normalizar columnas de enriquecimiento
-    rep = reporte_df[["movement_date", "abs_amount", "tienda", "tipo_banco"]].copy()
-    rep = rep.dropna(subset=["abs_amount"])
-    rep["_amt_key"] = rep["abs_amount"].round(2)
-    rep["_date_key"] = rep["movement_date"].dt.date
+    bank = bank_df.copy().reset_index(drop=True)
+    rep = reporte_df[["movement_date", "tienda", "tipo_banco"]].copy()
 
-    # Eliminar duplicados de clave (si el reporte repite el mismo monto+fecha+tienda)
-    rep = rep.drop_duplicates(subset=["_date_key", "_amt_key"])
+    # Usar monto con signo para evitar cruces falso-positivo (+15 vs -15).
+    if "amount_signed" in reporte_df.columns:
+        rep["_signed_key"] = reporte_df["amount_signed"].round(2)
+    elif "abs_amount" in reporte_df.columns:
+        rep["_signed_key"] = reporte_df["abs_amount"].round(2)
+    else:
+        return bank_df
 
-    bank = bank_df.copy()
-    bank["_amt_key"]  = bank["abs_amount"].round(2)
+    if "amount_signed" in bank.columns:
+        bank["_signed_key"] = bank["amount_signed"].round(2)
+    elif "abs_amount" in bank.columns:
+        bank["_signed_key"] = bank["abs_amount"].round(2)
+    else:
+        return bank_df
+
+    rep = rep.dropna(subset=["_signed_key"]).copy()
+    rep["_date_key"] = reporte_df["movement_date"].dt.date
     bank["_date_key"] = bank["movement_date"].dt.date
 
-    merged = bank.merge(
-        rep[["_date_key", "_amt_key", "tienda", "tipo_banco"]],
-        on=["_date_key", "_amt_key"],
-        how="left",
-        suffixes=("", "_rep"),
-    )
+    # Índice de candidatos por monto con signo, consumibles 1 a 1.
+    available_by_amount: dict = {}
+    for rep_idx, rep_row in rep.iterrows():
+        amt_key = rep_row["_signed_key"]
+        available_by_amount.setdefault(amt_key, []).append(rep_idx)
 
-    # Contar matches para logging
-    matches = merged[merged["tienda"].notna() | merged.get("tienda_rep", _pd.Series()).notna()].shape[0]
-    logger.debug(f"[ENRICH] Matches encontrados: {matches}/{len(merged)}")
+    matched_rep_tienda = _pd.Series([None] * len(bank), dtype="object")
+    matched_rep_tipo = _pd.Series([None] * len(bank), dtype="object")
+    used_rep_indices: set[int] = set()
 
-    # Si bank_df ya tenía tienda (p. ej. también es REPORTE), preferir la existente
-    # Si NO tenía tienda, usar la del reporte si existe
-    if "tienda" not in bank.columns and "tienda_rep" in merged.columns:
-        merged["tienda"] = merged["tienda_rep"]
-    elif "tienda" in merged.columns and "tienda_rep" in merged.columns:
-        merged["tienda"] = merged["tienda"].fillna(merged["tienda_rep"])
-        
-    if "tipo_banco" not in bank.columns and "tipo_banco_rep" in merged.columns:
-        merged["tipo_banco"] = merged["tipo_banco_rep"]
-    elif "tipo_banco" in merged.columns and "tipo_banco_rep" in merged.columns:
-        merged["tipo_banco"] = merged["tipo_banco"].fillna(merged["tipo_banco_rep"])
+    for bank_idx, bank_row in bank.iterrows():
+        amt_key = bank_row["_signed_key"]
+        date_key = bank_row["_date_key"]
+        candidates = available_by_amount.get(amt_key)
+        if not candidates:
+            continue
 
-    # Limpiar columnas auxiliares
-    drop_cols = ["_amt_key", "_date_key"] + [c for c in merged.columns if c.endswith("_rep")]
-    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+        eligible = []
+        for rep_idx in candidates:
+            if rep_idx in used_rep_indices:
+                continue
+            rep_date = rep.at[rep_idx, "_date_key"]
+            day_diff = abs((date_key - rep_date).days)
+            if day_diff <= _DATE_TOLERANCE_DAYS:
+                eligible.append((day_diff, rep_idx))
 
-    return merged.reset_index(drop=True)
+        if not eligible:
+            continue
+
+        # Elegir el más cercano en fecha para reducir cruces ambiguos.
+        eligible.sort(key=lambda x: (x[0], x[1]))
+        chosen_rep_idx = eligible[0][1]
+        used_rep_indices.add(chosen_rep_idx)
+        rep_match = rep.loc[chosen_rep_idx]
+        matched_rep_tienda.iloc[bank_idx] = rep_match.get("tienda")
+        matched_rep_tipo.iloc[bank_idx] = rep_match.get("tipo_banco")
+
+    # Si bank_df ya tenía tienda/tipo, conservar salvo cuando está vacío.
+    if "tienda" not in bank.columns:
+        bank["tienda"] = matched_rep_tienda
+    else:
+        tienda_base = bank["tienda"].fillna("").astype(str).str.strip()
+        bank["tienda"] = bank["tienda"].where(tienda_base != "", matched_rep_tienda)
+
+    if "tipo_banco" not in bank.columns:
+        bank["tipo_banco"] = matched_rep_tipo
+    else:
+        tipo_base = bank["tipo_banco"].fillna("").astype(str).str.strip()
+        bank["tipo_banco"] = bank["tipo_banco"].where(tipo_base != "", matched_rep_tipo)
+
+    matches = int(matched_rep_tienda.notna().sum() + matched_rep_tipo.notna().sum())
+    logger.debug(f"[ENRICH] Matches 1:1 aplicados: {matches}/{len(bank)}")
+
+    drop_cols = ["_signed_key", "_date_key"]
+    bank = bank.drop(columns=[c for c in drop_cols if c in bank.columns])
+    return bank.reset_index(drop=True)
 
 
 # ============================================================
@@ -307,17 +385,20 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
         
         if not reporte_6614.empty:
             logger.info("[ENRIQUECIMIENTO] Movimientos 6614 en REPORTE_CAJA: %d", len(reporte_6614))
+
+            bank_account_str = bank_df["account_id"].fillna("").astype(str).str.strip() if not bank_df.empty else _pd.Series(dtype=str)
+            bank_6614_mask = bank_account_str.eq("6614") | bank_account_str.str.endswith("6614")
             
             # CRÍTICO: Solo enriquecer los movimientos bancarios de la cuenta 6614
             # Previene cruce de comisiones de múltiples cuentas con igual monto + fecha
-            bank_6614 = bank_df[bank_df["account_id"] == "6614"].copy() if not bank_df.empty else _pd.DataFrame()
+            bank_6614 = bank_df[bank_6614_mask].copy() if not bank_df.empty else _pd.DataFrame()
             
             if not bank_6614.empty:
                 # Enriquecer solo los movimientos 6614 con reporte (agregar tienda + tipo_pago)
                 bank_6614_enriched = _enrich_bank_with_reporte(bank_6614, reporte_6614)
                 
                 # Recombinar: 6614 enriquecido + otras cuentas sin cambios
-                bank_other = bank_df[bank_df["account_id"] != "6614"].copy()
+                bank_other = bank_df[~bank_6614_mask].copy()
                 bank_df = _pd.concat([bank_6614_enriched, bank_other], ignore_index=True) if not bank_other.empty else bank_6614_enriched
                 
                 logger.info(
@@ -429,6 +510,8 @@ def run_pipeline(
         len(bank_df), len(jde_df),
     )
     engine  = ReconciliationEngine()
+    bank_accounts = set(bank_df["account_id"].unique()) if not bank_df.empty else set()
+    _configure_engine_for_accounts(engine, bank_accounts)
     results = engine.reconcile(bank_df, jde_df)
     results["_mp_color_filter_debug"] = mp_color_filter_debug
 
@@ -465,6 +548,8 @@ def run_pipeline_stage1(
     )
 
     engine = ReconciliationEngine()
+    bank_accounts = set(bank_df["account_id"].unique()) if not bank_df.empty else set()
+    selected_mode = _configure_engine_for_accounts(engine, bank_accounts)
     interactive_result = engine.reconcile_interactive(bank_df, jde_df)
 
     # ── Metadatos para el write-back del Papel de Trabajo ──
@@ -475,6 +560,7 @@ def run_pipeline_stage1(
     interactive_result["_jde_source_path"]   = str(jde_file_path)
     interactive_result["_is_papel_trabajo"]  = is_pt
     interactive_result["_bank_accounts"]     = list(bank_accounts)
+    interactive_result["_engine_mode"]       = selected_mode
     interactive_result["_mp_color_filter_debug"] = mp_color_filter_debug
 
     if is_pt:
@@ -544,6 +630,8 @@ def run_pipeline_stage2(
         results["_bank_accounts"] = interactive_result["_bank_accounts"]
     if "_mp_color_filter_debug" in interactive_result:
         results["_mp_color_filter_debug"] = interactive_result["_mp_color_filter_debug"]
+    if "_engine_mode" in interactive_result:
+        results["_engine_mode"] = interactive_result["_engine_mode"]
     
     return results
 

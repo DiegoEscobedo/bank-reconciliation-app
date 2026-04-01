@@ -1,7 +1,28 @@
 AMOUNT_TOLERANCE = 0.50       # centavo máximo permitido (BBVA redondea diferente al JDE)
 DATE_TOLERANCE_DAYS = 2       # cubre viernes → lunes y fines de semana largos
 MAX_GROUP_SIZE = 10           # más entradas por grupo (el filtro por tienda reduce candidatos)
+GROUPED_CANDIDATE_LIMIT = 15  # top N candidatos por monto para subset-sum (menos = más rápido)
 ROUND_DECIMALS = 2
+
+# ── Mapeos de tipo de pago (fuente de verdad) ───────────────────────────────
+# FORMA DE PAGO del Papel de Trabajo (JDE) → tipo_jde normalizado
+FORMA_PAGO_TO_TIPO_JDE: dict[str, str] = {
+    "1": "01", "01": "01",
+    "3": "03", "03": "03",
+    "8": "03", "08": "03",
+    "4": "04", "04": "04",
+    "28": "28",
+}
+
+# tipo_banco (banco/reporte) → tipos_jde compatibles para conciliación
+TIPO_BANCO_TO_JDE_COMPAT: dict[str, set[str]] = {
+    "TPV": {"28", "04"},
+    "TR":  {"03"},
+    "03":  {"01", "03"},
+    "01":  {"01"},
+    "04":  {"04"},
+    "28":  {"28"},
+}
 
 # ── Cuentas que usan "Papel de Trabajo" Excel + write-back ─────────────────
 # Para estas cuentas: se espera un archivo Excel del Papel de Trabajo, y se actualiza al final
@@ -45,13 +66,15 @@ TIENDA_ABBREV: dict[str, str] = {
     "CESANTONI GUADALUPE": "OUG",
     "CESANTONI FLLO":      "FRE",
     "CESANTONI FRESNILLO": "FRE",
+    "CESANTONI OUTLET FRESNILLO": "OUF",
     "CESANTONI JALPA":     "JAL",
     "CESANTONI JEREZ":     "JER",
     "CESANTONI OJOCALIENTE": "OUOJO",
     "CESANTONI RIO GRANDE":   "RG",
     "CESANTONI ZACATECAS":   "OUZ",
     "CESANTONI ZAC":          "OUZ",
-    "CESANTONI GALERIAS 1":      "GAL",
+    "CESANTONI GALERIAS":   "GAL",
+    "CESANTONI GALERIAS 1": "GAL",
     # Mercado Pago: columna Sucursal → abreviatura JDE
     # Outlets (nombres completos y abreviados como vienen en MP)
     "OUTLET CALERA":       "OUC",

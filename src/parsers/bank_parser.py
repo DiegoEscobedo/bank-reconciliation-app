@@ -12,6 +12,8 @@ Agrega soporte para nuevos bancos implementando un sub-parser que herede
 de _BaseBankParser y registrándolo en BankParser._PARSERS.
 """
 
+import re
+
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
@@ -846,6 +848,19 @@ class _ReporteCajaParser(_BaseBankParser):
     # Palabras clave que identifican la fila de cabeceras
     _HEADER_KEYWORDS = {"FECHA", "TIENDA", "MONTO", "BANCO"}
 
+    @staticmethod
+    def _extract_tipo_banco_from_text(*parts) -> str | None:
+        """
+        Extrae tipo_banco desde texto libre.
+        Prioriza TPV/TR explícitos y también reconoce "TRANSFERENCIA" como TR.
+        """
+        text = " ".join(str(p) for p in parts if p is not None).upper()
+        if re.search(r"(?<![A-Z0-9])TPV(?![A-Z0-9])", text):
+            return "TPV"
+        if re.search(r"(?<![A-Z0-9])TR(?![A-Z0-9])", text) or "TRANSFERENCIA" in text:
+            return "TR"
+        return None
+
     def _find_header_row(self, raw: pd.DataFrame) -> int:
         """Devuelve el índice (0-based) de la fila de cabeceras."""
         for i, row in raw.iterrows():
@@ -893,12 +908,15 @@ class _ReporteCajaParser(_BaseBankParser):
             # Mapear tienda a abreviatura JDE
             tienda_abbrev = _TIENDA_ABBREV.get(tienda_raw.upper(), "NO ENCONTRADO")
 
-            # Tipo banco: TR / TPV / vacío (si tienda existe) o vacío (si no existe)
+            # Tipo banco: detectar TR/TPV desde observacion/descripcion incluso sin tienda.
             obs_clean = obs.strip().upper()
-            if tienda_abbrev == "NO ENCONTRADO":
-                tipo_banco = ""  # Sin tipo de pago cuando tienda no existe
+            tipo_detectado = self._extract_tipo_banco_from_text(obs_clean, tienda_raw, banco)
+            if not obs_clean:
+                # Regla de negocio: observación vacía se considera efectivo.
+                tipo_banco = "01"
             else:
-                tipo_banco = obs_clean if obs_clean in ("TR", "TPV") else None
+                # Si hay texto en observación y no cae en TR/TPV, conservar texto crudo.
+                tipo_banco = tipo_detectado or obs_clean
 
             rows.append({
                 "account_id":        account_id,
@@ -1100,9 +1118,9 @@ class BankParser:
                 if _force_reporte_caja:
                     _is_reporte_caja = True
                 else:
-                    # Detectar si alguna de las primeras 5 filas tiene cabeceras de caja
+                    # Detectar si alguna de las primeras filas tiene cabeceras de caja
                     _keywords = {"FECHA", "TIENDA", "BANCO", "MONTO"}
-                    for _i in range(min(5, len(hoja1))):
+                    for _i in range(min(10, len(hoja1))):
                         _row_vals = {str(v).strip().upper() for v in hoja1.iloc[_i].values}
                         if len(_row_vals & _keywords) >= 3:
                             _is_reporte_caja = True
@@ -1112,7 +1130,7 @@ class BankParser:
                         _is_reporte_caja = str(hoja1.iloc[0, 0]).strip().upper() == "TIENDAS"
 
                 if _is_reporte_caja:
-                    logger.info("Formato bancario detectado: REPORTE_CAJA")
+                    logger.info("Formato bancario detectado: REPORTE_CAJA (hoja=0)")
                     result = _ReporteCajaParser().parse_raw(hoja1)
                     logger.info("[REPORTE_CAJA] Filas parseadas: %d", len(result))
                     return result

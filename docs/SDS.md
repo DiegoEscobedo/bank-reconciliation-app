@@ -3,11 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.2 |
-| Fecha | 26/03/2026 |
+| Versión | 1.3 |
+| Fecha | 30/03/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
-| Cambios | Scotiabank, Mercado Pago, matching inverso, fecha conciliación automática, metadatos preservation |
+| Cambios | Histórico estricto por cuenta, filtro MercadoPago por grupos de color (total vs Scotiabank), write-back con aislamiento por cuenta |
 
 ---
 
@@ -59,8 +59,9 @@ bank-reconciliation-app/
 │   └── __init__.py
 ├── src/
 │   ├── parsers/
-│   │   ├── bank_parser.py          # Parser bancario (BBVA, Banorte, Reporte Caja)
-│   │   └── jde_parser.py           # Parser JDE (CSV R550911A1 y Papel de Trabajo)
+│   │   ├── bank_parser.py          # Parser bancario (BBVA, Banorte, Scotiabank, Mercado Pago, NetPay, Reporte Caja)
+│   │   ├── jde_parser.py           # Parser JDE (CSV R550911A1 y Papel de Trabajo)
+│   │   └── conciliacion_parser.py  # Parser de conciliación histórica previa
 │   ├── normalizers/
 │   │   ├── bank_normalizer.py      # Normalización a esquema estándar (banco)
 │   │   └── jde_normalizer.py       # Normalización a esquema estándar (JDE)
@@ -68,6 +69,7 @@ bank-reconciliation-app/
 │   │   └── schema_validator.py     # Validación del esquema estándar
 │   ├── matching/
 │   │   ├── reconciliation_engine.py # Motor principal
+│   │   ├── historical_matcher.py   # Cruce de pendientes históricos
 │   │   ├── exact_matcher.py        # Lógica de matching exacto
 │   │   └── grouped_matcher.py      # Lógica de matching agrupado (subset sum)
 │   ├── reporting/
@@ -119,10 +121,18 @@ _BaseBankParser
     └── _ReporteCajaParser   → REPORTE_CAJA Excel (enriquecimiento 6614)
 ```
 
-**Cambios v1.2:**
+**Cambios v1.3:**
 - Agregados parsers: Scotiabank (con validación de columnas), Mercado Pago (con filtro gris), NetPay
 - Scotiabank: validación dinámica; si <14 columnas usa Series vacíos
-- Mercado Pago: detecta y descarta filas con color gris (R=G=B en AARRGGBB hex)
+- Mercado Pago: conserva filas con estado aprobado/aprovado y expone dos montos:
+    - `raw_deposit` (COBRO) para conciliación contra JDE
+    - `raw_total_recibir` para filtro por grupos de color contra Scotiabank
+
+**Filtro MercadoPago por grupo de color (main.py):**
+- Se agrupa Mercado Pago por `cell_color`.
+- Se suma `raw_total_recibir` por grupo.
+- Solo pasan al motor los grupos cuyo total existe en los depósitos de Scotiabank.
+- Esta regla define qué registros entran a conciliación; el matching contra JDE permanece con COBRO.
 
 **Flujo de detección:**
 1. Lee el archivo completo sin header.
@@ -381,7 +391,9 @@ Usa `openpyxl` para modificar el archivo original preservando fórmulas:
 4. Para cada fila de datos, si el `Aux_Fact` está en `reconciled_aux_facts`, escribe:
    - Columna `CONCILIADO` → `"Sí"`
    - Columna `FECHA CONCILIACION` → `match_date`
-5. Retorna el contenido como `bytes` para descarga directa.
+5. Cuando se proporciona `filter_accounts`, solo marca filas cuya cuenta en descripción
+    (`CUENTA XXXX`) pertenezca a las cuentas permitidas (aislamiento por cuenta).
+6. En Streamlit, para cuentas bancarias largas se comparan últimos 4 dígitos contra Papel.
 
 ---
 
@@ -435,6 +447,22 @@ Botones de descarga:
 ```
 
 **Gestión de estado:** Se usa `st.session_state` para conservar resultados entre rerenders de Streamlit.
+
+---
+
+### 4.12 `src/parsers/conciliacion_parser.py` + `src/matching/historical_matcher.py`
+
+**Responsabilidad:** Análisis histórico de pendientes (solo analítico, no modifica conciliación actual).
+
+**`conciliacion_parser.py`:**
+- Lee el archivo de conciliación anterior y extrae pendientes por sección (`mas`, `menos`).
+- Soporta variaciones de fecha en español y typos comunes.
+
+**`historical_matcher.py`:**
+- Cruza pendientes históricos contra conciliados/pendientes del período actual por monto + fecha.
+- Modo estricto por cuenta activo en UI: exige match de `account_id` con compatibilidad cuenta corta/larga por sufijo.
+- Clasifica cada histórico como: `CONCILIADO`, `PENDIENTE_BANCO`, `PENDIENTE_JDE`, `AUN_PENDIENTE`.
+- No altera `is_matched` del motor principal ni write-back; solo genera métricas y tabla histórica.
 
 ---
 

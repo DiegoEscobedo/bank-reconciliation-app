@@ -9,10 +9,14 @@ Soporta dos formatos:
 
 import re
 from datetime import datetime
+import unicodedata
 
 import pandas as pd
 
-from config.settings import TIENDA_ABBREV as _TIENDA_ABBREV
+from config.settings import (
+    FORMA_PAGO_TO_TIPO_JDE as _FORMA_PAGO_MAP_DEFAULT,
+    TIENDA_ABBREV as _TIENDA_ABBREV,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -141,13 +145,8 @@ class PapelTrabajoParser:
     # Nombres de hoja preferidos (en orden)
     _SHEET_PRIORITY = ["AUX CONTABLE", "Detalle1"]
 
-    # Mapeo FORMA DE PAGO (int/str) → tipo_jde
-    _FORMA_PAGO_MAP = {
-        "1": "01", "01": "01",
-        "3": "03", "03": "03",
-        "4": "04", "04": "04",
-        "28": "28",
-    }
+    # Mapeo FORMA DE PAGO (int/str) → tipo_jde (centralizado en settings)
+    _FORMA_PAGO_MAP = _FORMA_PAGO_MAP_DEFAULT.copy()
 
     def parse(self, file_path: str) -> pd.DataFrame:
         logger.info("[PapelTrabajo] Leyendo: %s", file_path)
@@ -226,9 +225,15 @@ class PapelTrabajoParser:
 
     def _build_output(self, df: pd.DataFrame, file_path: str) -> pd.DataFrame:
 
+        def _norm_col_name(value: str) -> str:
+            text = unicodedata.normalize("NFKD", str(value))
+            text = "".join(ch for ch in text if not unicodedata.combining(ch))
+            return " ".join(text.strip().upper().split())
+
         def get_col(*candidates):
+            normalized_candidates = {_norm_col_name(x) for x in candidates}
             for c in df.columns:
-                if c.strip() in {x.strip() for x in candidates}:
+                if _norm_col_name(c) in normalized_candidates:
                     return c
             return None
 
@@ -240,7 +245,7 @@ class PapelTrabajoParser:
         col_amount  = get_col("Importe")
         col_desc    = get_col("Explicación -observación-", "Explicacion -observacion-")
         col_desc2   = get_col("Nombre alfa explicación", "Nombre alfa explicacion")
-        col_tipo    = get_col("FORMA DE PAGO")
+        col_tipo    = get_col("FORMA DE PAGO", "FORMA PAGO", "TIPO PAGO")
         col_tienda  = get_col("TIENDA")
         col_conc    = get_col("CONCILIADO")
         col_row     = "_excel_row"
@@ -282,12 +287,19 @@ class PapelTrabajoParser:
         )
 
         # ── tipo_jde ────────────────────────────────────────
-        tipo_jde = s(col_tipo).apply(
-            lambda v: self._FORMA_PAGO_MAP.get(
-                str(int(float(v))) if v.replace(".", "", 1).isdigit() else v,
-                None
-            ) if v not in ("", "nan") else None
-        )
+        def _normalize_tipo_jde(raw_value):
+            raw_text = str(raw_value).strip()
+            if raw_text in ("", "nan", "None", "NaT"):
+                return "01"
+
+            if raw_text.replace(".", "", 1).isdigit():
+                key = str(int(float(raw_text)))
+            else:
+                key = raw_text
+
+            return self._FORMA_PAGO_MAP.get(key, "01")
+
+        tipo_jde = s(col_tipo).apply(_normalize_tipo_jde)
 
         # ── tienda (full name → abreviatura) ─────────────────
         tienda = s(col_tienda).apply(

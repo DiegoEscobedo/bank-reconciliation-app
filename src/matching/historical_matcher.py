@@ -60,12 +60,33 @@ def _date_diff_days(d1: pd.Timestamp, d2: pd.Timestamp) -> Optional[int]:
     return abs((d1 - d2).days)
 
 
+def _normalize_account(value: object) -> str:
+    """Normaliza cuenta para comparación robusta (trim + sin espacios)."""
+    if value is None or pd.isnull(value):
+        return ""
+    return str(value).strip().replace(" ", "")
+
+
+def _account_match(hist_account: object, candidate_account: object) -> bool:
+    """
+    Compara cuentas permitiendo formato largo/corto.
+    Ejemplos válidos: '7133' vs '20305077133'.
+    """
+    h = _normalize_account(hist_account)
+    c = _normalize_account(candidate_account)
+    if not h or not c:
+        return False
+    return h == c or h.endswith(c) or c.endswith(h)
+
+
 def _find_best_match(
     hist_amount: float,
     hist_date: pd.Timestamp,
+    hist_account: object,
     candidates: pd.DataFrame,
     date_tol: int = HIST_DATE_TOLERANCE_DAYS,
     amount_tol: float = AMOUNT_TOLERANCE,
+    require_same_account: bool = False,
 ) -> tuple[bool, Optional[int]]:
     """
     Busca la mejor coincidencia en `candidates` para un monto e historial dados.
@@ -78,6 +99,10 @@ def _find_best_match(
     for idx, row in candidates.iterrows():
         cand_amount = float(row.get("abs_amount", 0) or 0)
         cand_date   = row.get("movement_date")
+        cand_account = row.get("account_id")
+
+        if require_same_account and not _account_match(hist_account, cand_account):
+            continue
 
         if not _amount_match(hist_amount, cand_amount, amount_tol):
             continue
@@ -101,6 +126,7 @@ def match_historical_pendientes(
     pending_jde:      pd.DataFrame | None = None,
     date_tolerance_days: int = HIST_DATE_TOLERANCE_DAYS,
     amount_tolerance:    float = AMOUNT_TOLERANCE,
+    require_same_account: bool = False,
 ) -> pd.DataFrame:
     """
     Cruza `hist_df` (pendientes históricos) con los movimientos del período actual.
@@ -112,6 +138,8 @@ def match_historical_pendientes(
     pending_bank / pending_jde          : pendientes del período actual
     date_tolerance_days                 : rango aceptable en días
     amount_tolerance                    : diferencia máxima en pesos
+    require_same_account                : si True, exige misma cuenta (con compatibilidad
+                                          largo/corto por sufijo)
 
     Returns
     -------
@@ -145,6 +173,7 @@ def match_historical_pendientes(
     for _, hist_row in hist_df.iterrows():
         h_amount = float(hist_row.get("abs_amount", 0) or 0)
         h_date   = hist_row.get("movement_date")
+        h_account = hist_row.get("account_id")
         if not isinstance(h_date, pd.Timestamp):
             h_date = pd.NaT
 
@@ -154,7 +183,15 @@ def match_historical_pendientes(
         m_amount = float("nan")
 
         # 1) ¿Ya fue conciliado en el banco este período?
-        found, idx = _find_best_match(h_amount, h_date, cb, date_tolerance_days, amount_tolerance)
+        found, idx = _find_best_match(
+            h_amount,
+            h_date,
+            h_account,
+            cb,
+            date_tolerance_days,
+            amount_tolerance,
+            require_same_account,
+        )
         if found and idx is not None:
             row = cb.loc[idx]
             status   = "CONCILIADO"
@@ -164,7 +201,15 @@ def match_historical_pendientes(
 
         # 2) ¿Ya fue conciliado en JDE este período?
         if status == "AUN_PENDIENTE":
-            found, idx = _find_best_match(h_amount, h_date, cj, date_tolerance_days, amount_tolerance)
+            found, idx = _find_best_match(
+                h_amount,
+                h_date,
+                h_account,
+                cj,
+                date_tolerance_days,
+                amount_tolerance,
+                require_same_account,
+            )
             if found and idx is not None:
                 row = cj.loc[idx]
                 status   = "CONCILIADO"
@@ -174,7 +219,15 @@ def match_historical_pendientes(
 
         # 3) ¿Está pendiente banco este período?
         if status == "AUN_PENDIENTE":
-            found, idx = _find_best_match(h_amount, h_date, pb, date_tolerance_days, amount_tolerance)
+            found, idx = _find_best_match(
+                h_amount,
+                h_date,
+                h_account,
+                pb,
+                date_tolerance_days,
+                amount_tolerance,
+                require_same_account,
+            )
             if found and idx is not None:
                 row = pb.loc[idx]
                 status   = "PENDIENTE_BANCO"
@@ -184,7 +237,15 @@ def match_historical_pendientes(
 
         # 4) ¿Está pendiente JDE este período?
         if status == "AUN_PENDIENTE":
-            found, idx = _find_best_match(h_amount, h_date, pj, date_tolerance_days, amount_tolerance)
+            found, idx = _find_best_match(
+                h_amount,
+                h_date,
+                h_account,
+                pj,
+                date_tolerance_days,
+                amount_tolerance,
+                require_same_account,
+            )
             if found and idx is not None:
                 row = pj.loc[idx]
                 status   = "PENDIENTE_JDE"
