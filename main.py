@@ -498,6 +498,8 @@ def run_pipeline(
     bank_file_path,          # str  o  list[str]
     jde_file_path: str,
     output_dir: str,
+    amount_tolerance: float | None = None,
+    date_tolerance_days: int | None = None,
 ) -> dict:
 
     output_path = Path(output_dir)
@@ -510,6 +512,10 @@ def run_pipeline(
         len(bank_df), len(jde_df),
     )
     engine  = ReconciliationEngine()
+    if amount_tolerance is not None:
+        engine.amount_tolerance = float(amount_tolerance)
+    if date_tolerance_days is not None:
+        engine.date_tolerance_days = int(date_tolerance_days)
     bank_accounts = set(bank_df["account_id"].unique()) if not bank_df.empty else set()
     _configure_engine_for_accounts(engine, bank_accounts)
     results = engine.reconcile(bank_df, jde_df)
@@ -530,6 +536,8 @@ def run_pipeline(
 def run_pipeline_stage1(
     bank_file_path,   # str o list[str]
     jde_file_path: str,
+    amount_tolerance: float | None = None,
+    date_tolerance_days: int | None = None,
 ) -> dict:
     """
     Parsea, normaliza, valida y ejecuta el matching exacto.
@@ -548,6 +556,10 @@ def run_pipeline_stage1(
     )
 
     engine = ReconciliationEngine()
+    if amount_tolerance is not None:
+        engine.amount_tolerance = float(amount_tolerance)
+    if date_tolerance_days is not None:
+        engine.date_tolerance_days = int(date_tolerance_days)
     bank_accounts = set(bank_df["account_id"].unique()) if not bank_df.empty else set()
     selected_mode = _configure_engine_for_accounts(engine, bank_accounts)
     interactive_result = engine.reconcile_interactive(bank_df, jde_df)
@@ -561,6 +573,8 @@ def run_pipeline_stage1(
     interactive_result["_is_papel_trabajo"]  = is_pt
     interactive_result["_bank_accounts"]     = list(bank_accounts)
     interactive_result["_engine_mode"]       = selected_mode
+    interactive_result["_amount_tolerance"]  = engine.amount_tolerance
+    interactive_result["_date_tolerance_days"] = engine.date_tolerance_days
     interactive_result["_mp_color_filter_debug"] = mp_color_filter_debug
 
     if is_pt:
@@ -632,6 +646,10 @@ def run_pipeline_stage2(
         results["_mp_color_filter_debug"] = interactive_result["_mp_color_filter_debug"]
     if "_engine_mode" in interactive_result:
         results["_engine_mode"] = interactive_result["_engine_mode"]
+    if "_amount_tolerance" in interactive_result:
+        results["_amount_tolerance"] = interactive_result["_amount_tolerance"]
+    if "_date_tolerance_days" in interactive_result:
+        results["_date_tolerance_days"] = interactive_result["_date_tolerance_days"]
     
     return results
 

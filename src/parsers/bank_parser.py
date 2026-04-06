@@ -13,6 +13,7 @@ de _BaseBankParser y registrándolo en BankParser._PARSERS.
 """
 
 import re
+import unicodedata
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -23,6 +24,14 @@ from src.utils.date_utils import looks_like_date, parse_date_spanish
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _normalize_text(value: object) -> str:
+    text = str(value or "").strip().upper()
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
 
 
 # ════════════════════════════════════════════════════════════
@@ -983,6 +992,48 @@ class _HSBCParser(_BaseBankParser):
     _COL_CREDITO = 22    # 0-indexed: Col 23 (depósito)
     _COL_DEBITO = 23     # 0-indexed: Col 24 (retiro)
 
+    _HEADER_ACCOUNT = (
+        "NUMERO DE CUENTA",
+        "NUMERO CUENTA",
+        "CUENTA",
+    )
+    _HEADER_DESC = (
+        "DESCRIPCION",
+    )
+    _HEADER_FECHA = (
+        "FECHA VALOR",
+        "FECHA DEL APUNTE",
+        "FECHA",
+    )
+    _HEADER_CREDITO = (
+        "IMPORTE DE CREDITO",
+        "CREDITO",
+    )
+    _HEADER_DEBITO = (
+        "IMPORTE DEL DEBITO",
+        "IMPORTE DE DEBITO",
+        "DEBITO",
+    )
+
+    @staticmethod
+    def _resolve_col(headers: list[str], keywords: tuple[str, ...], fallback: int) -> str:
+        normalized_to_actual = {
+            _normalize_text(col): col
+            for col in headers
+        }
+        for kw in keywords:
+            kw_norm = _normalize_text(kw)
+            if kw_norm in normalized_to_actual:
+                return normalized_to_actual[kw_norm]
+        for kw in keywords:
+            kw_norm = _normalize_text(kw)
+            for norm, actual in normalized_to_actual.items():
+                if kw_norm in norm:
+                    return actual
+        if 0 <= fallback < len(headers):
+            return headers[fallback]
+        return ""
+
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
         # Las columnas ya están numeradas (0-indexed) desde el read_file
         # Fila 0 es header, filas 1+ son datos
@@ -1002,25 +1053,31 @@ class _HSBCParser(_BaseBankParser):
         df.columns = headers
         df = df.reset_index(drop=True)
 
-        # Extraer número de cuenta de la primera fila (row 1, col 2 = index 1)
-        account_id = ""
-        try:
-            account_id = str(raw.iloc[1, self._COL_CUENTA]).strip()
-            if account_id.lower() in ("", "nan", "none"):
-                account_id = "UNKNOWN"
-        except Exception:
-            account_id = "UNKNOWN"
+        col_cuenta_name = self._resolve_col(headers, self._HEADER_ACCOUNT, self._COL_CUENTA)
+        col_desc_name = self._resolve_col(headers, self._HEADER_DESC, self._COL_DESC)
+        col_fecha_name = self._resolve_col(headers, self._HEADER_FECHA, self._COL_FECHA)
+        col_credito_name = self._resolve_col(headers, self._HEADER_CREDITO, self._COL_CREDITO)
+        col_debito_name = self._resolve_col(headers, self._HEADER_DEBITO, self._COL_DEBITO)
+
+        # Extraer cuenta desde la primera fila válida de la columna de cuenta.
+        account_id = "UNKNOWN"
+        if col_cuenta_name and col_cuenta_name in df.columns:
+            cuentas = (
+                df[col_cuenta_name]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+            cuentas = cuentas[
+                ~cuentas.str.lower().isin(["", "nan", "none"])
+            ]
+            if not cuentas.empty:
+                account_id = str(cuentas.iloc[0]).strip()
 
         logger.info("[HSBC] Cuenta detectada: %s", account_id)
 
-        # Filtrar filas: columna 22 (fecha) debe tener valor
-        col_fecha_name = headers[self._COL_FECHA] if self._COL_FECHA < len(headers) else "Fecha"
-        col_desc_name = headers[self._COL_DESC] if self._COL_DESC < len(headers) else "Descripción"
-        col_credito_name = headers[self._COL_CREDITO] if self._COL_CREDITO < len(headers) else "Crédito"
-        col_debito_name = headers[self._COL_DEBITO] if self._COL_DEBITO < len(headers) else "Débito"
-
         # Validar que tenemos columnas mínimas
-        if col_fecha_name not in df.columns:
+        if not col_fecha_name or col_fecha_name not in df.columns:
             available = df.columns.tolist()
             logger.error(f"[HSBC] No se encontró columna de fecha. Disponibles: {available}")
             raise ValueError(f"[HSBC] Estructura no reconocida. Esperado header en fila 0.")
@@ -1029,12 +1086,16 @@ class _HSBCParser(_BaseBankParser):
         df = df[df[col_fecha_name].astype(str).apply(looks_like_date)].copy()
 
         # Renombrar columnas para output
-        df_out = pd.DataFrame()
+        df_out = pd.DataFrame(index=df.index)
+        df_out["raw_date"] = df[col_fecha_name].astype(str)
         df_out["account_id"] = account_id
         df_out["bank"] = self.BANK_NAME
-        df_out["raw_date"] = df[col_fecha_name].astype(str)
-        df_out["description"] = df[col_desc_name].astype(str)
-        df_out["description_detail"] = df[col_desc_name].astype(str)
+        if col_desc_name and col_desc_name in df.columns:
+            df_out["description"] = df[col_desc_name].astype(str)
+            df_out["description_detail"] = df[col_desc_name].astype(str)
+        else:
+            df_out["description"] = ""
+            df_out["description_detail"] = ""
 
         # Crédito (depósito) y Débito (retiro)
         df_out["raw_deposit"] = ""
@@ -1042,8 +1103,8 @@ class _HSBCParser(_BaseBankParser):
 
         for idx, row in df.iterrows():
             try:
-                credito = str(row[col_credito_name]).strip() if col_credito_name in row.index else ""
-                debito = str(row[col_debito_name]).strip() if col_debito_name in row.index else ""
+                credito = str(row[col_credito_name]).strip() if col_credito_name and col_credito_name in row.index else ""
+                debito = str(row[col_debito_name]).strip() if col_debito_name and col_debito_name in row.index else ""
                 
                 # Si hay crédito, es depósito
                 if credito and credito.lower() not in ("", "nan", "none"):
@@ -1215,11 +1276,11 @@ class BankParser:
         row0 = " ".join(raw.iloc[0].fillna("").astype(str).tolist())
         row1 = " ".join(raw.iloc[1].fillna("").astype(str).tolist()) if len(raw) > 1 else ""
 
-        row0_upper = row0.upper()
-        row1_upper = row1.upper()
+        row0_upper = _normalize_text(row0)
+        row1_upper = _normalize_text(row1)
 
         # BBVA: header en fila 0 con DEPÓSITOS / RETIROS
-        if "DEPOSITOS" in row0_upper or "DEPÓSITOS" in row0_upper or "FECHA DE OPERACI" in row0_upper:
+        if "DEPOSITOS" in row0_upper or "FECHA DE OPERACI" in row0_upper:
             return _BBVAParser
 
         # BANORTE: fila 0 comienza con "Cuenta" y fila 1 tiene "Cargo" / "Abono"
@@ -1247,10 +1308,10 @@ class BankParser:
         if len(raw) > 3 and "operaci" in str(raw.iloc[3, 0]).lower():
             return _MercadoPagoParser
 
-        # HSBC: fila 0 tiene "Número de cuenta" y alguna columna contiene "HSBC Mexico"
-        # o tiene las columnas: "Nombre de cuenta", "Número de cuenta", "Fecha valor", etc.
-        if ("NUMERO DE CUENTA" in row0_upper or "Número de cuenta" in row0) and (
+        # HSBC: encabezado con número de cuenta + pistas de layout HSBC.
+        if ("NUMERO DE CUENTA" in row0_upper) and (
             "HSBC" in row0_upper or "FECHA VALOR" in row0_upper or "IMPORTE DE CREDITO" in row0_upper
+            or "IMPORTE DEL DEBITO" in row0_upper
         ):
             return _HSBCParser
 

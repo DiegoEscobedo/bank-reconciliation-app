@@ -383,7 +383,10 @@ class ReconciliationEngine:
     def _normalize_account_token(value) -> str:
         if pd.isna(value):
             return ""
-        return str(value).strip().replace(" ", "")
+        token = str(value).strip().replace(" ", "")
+        if token.upper() in {"UNKNOWN", "NOENCONTRADO", "N/A", "NA", "NONE", "NULL", "NAN", "<NA>"}:
+            return ""
+        return token
 
     @classmethod
     def _accounts_compatible(cls, bank_account, jde_account) -> bool:
@@ -509,6 +512,7 @@ class ReconciliationEngine:
             bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
             if bank_tienda == "NO ENCONTRADO":
                 bank_tienda = ""
+            enforce_store_ambiguity_on_amount = False
             if "tienda" in potential_jde_candidates.columns:
                 potential_jde_candidates["jde_tienda"] = (
                     potential_jde_candidates["tienda"].fillna("").astype(str).str.strip().str.upper()
@@ -519,11 +523,39 @@ class ReconciliationEngine:
                         potential_jde_candidates["jde_tienda"] == bank_tienda
                     ]
                 else:
-                    # Si banco NO tiene tienda, solo aceptar JDE sin tienda
-                    # o con marcador explícito de no-encontrado.
-                    potential_jde_candidates = potential_jde_candidates[
-                        potential_jde_candidates["jde_tienda"].isin(["", "NO ENCONTRADO"])
-                    ]
+                    # Si banco NO tiene tienda, preferir JDE sin tienda.
+                    # Si no hay candidatos sin tienda, aceptar solo cuando la
+                    # tienda JDE sea no-ambigua entre candidatos por monto.
+                    empty_store_mask = potential_jde_candidates["jde_tienda"].isin(["", "NO ENCONTRADO"])
+                    if empty_store_mask.any():
+                        potential_jde_candidates = potential_jde_candidates[empty_store_mask]
+                    else:
+                        enforce_store_ambiguity_on_amount = True
+
+            if enforce_store_ambiguity_on_amount and not potential_jde_candidates.empty:
+                amount_matching_candidates = potential_jde_candidates[
+                    potential_jde_candidates["abs_amount"].apply(
+                        lambda jde_amt: self._is_amount_within_tolerance(
+                            bank_amount,
+                            round(jde_amt, self.rounding_decimals),
+                        )
+                    )
+                ]
+                if not amount_matching_candidates.empty:
+                    known_stores = set(
+                        amount_matching_candidates["jde_tienda"]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .str.upper()
+                        .tolist()
+                    )
+                    known_stores.discard("")
+                    known_stores.discard("NO ENCONTRADO")
+                    if len(known_stores) > 1:
+                        potential_jde_candidates = potential_jde_candidates.iloc[0:0]
+
+            if "jde_tienda" in potential_jde_candidates.columns:
                 potential_jde_candidates = potential_jde_candidates.drop(columns=["jde_tienda"])
 
             for jde_index, jde_row in potential_jde_candidates.iterrows():

@@ -6,7 +6,7 @@ from src.matching.reconciliation_engine import ReconciliationEngine
 
 
 class TestExactMatchingGuards(unittest.TestCase):
-    def test_exact_rejects_jde_tienda_when_bank_tienda_empty(self):
+    def test_exact_accepts_unique_jde_tienda_when_bank_tienda_empty(self):
         engine = ReconciliationEngine()
 
         bank_df = pd.DataFrame([
@@ -40,7 +40,105 @@ class TestExactMatchingGuards(unittest.TestCase):
         ])
 
         result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 1)
+
+    def test_exact_rejects_ambiguous_jde_tiendas_when_bank_tienda_empty(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "20305077133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro banco",
+                "amount_signed": -5040.0,
+                "abs_amount": 5040.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+                "bank": "SCOTIABANK",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro jde 1",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": -5040.0,
+                "abs_amount": 5040.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "OUG",
+                "tipo_jde": "03",
+            },
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro jde 2",
+                "doc_type": "JE",
+                "document": "2",
+                "amount_signed": -5040.0,
+                "abs_amount": 5040.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "FAB",
+                "tipo_jde": "03",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
         self.assertEqual(result["summary"]["exact_matches_count"], 0)
+
+    def test_exact_allows_unique_amount_match_even_with_multiple_stores_on_date(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "20305077133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro banco",
+                "amount_signed": -5040.0,
+                "abs_amount": 5040.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+                "bank": "SCOTIABANK",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro jde monto objetivo",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": -5040.0,
+                "abs_amount": 5040.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "OUG",
+                "tipo_jde": "03",
+            },
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-03-26"),
+                "description": "retiro jde otro monto",
+                "doc_type": "JE",
+                "document": "2",
+                "amount_signed": -6000.0,
+                "abs_amount": 6000.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "FAB",
+                "tipo_jde": "03",
+            },
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 1)
 
     def test_exact_does_not_cross_deposit_with_withdrawal(self):
         engine = ReconciliationEngine()
@@ -158,6 +256,41 @@ class TestExactMatchingGuards(unittest.TestCase):
         interactive = engine.reconcile_interactive(bank_df.copy(), jde_df.copy())
 
         assert len(interactive["exact_matches"]) == 1
+
+    def test_exact_treats_unknown_account_as_missing(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "UNKNOWN",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "TRANSF SOL X HSBCNET VICTOR JESUS",
+                "amount_signed": -3845.87,
+                "abs_amount": 3845.87,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "0177",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "CUELLAR REYNA VICTOR JESUS",
+                "doc_type": "PN",
+                "document": "11",
+                "amount_signed": -3845.87,
+                "abs_amount": 3845.87,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "",
+                "tipo_jde": "01",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 1)
 
 if __name__ == "__main__":
     unittest.main()

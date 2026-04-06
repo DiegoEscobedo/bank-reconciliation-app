@@ -13,6 +13,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from config.settings import (
+    AMOUNT_TOLERANCE,
+    DATE_TOLERANCE_DAYS,
+    TIPO_BANCO_TO_JDE_COMPAT,
+)
 from main import run_pipeline, run_pipeline_stage1, run_pipeline_stage2
 from src.reporting.excel_reporter import ExcelReporter
 from src.utils.logger import get_logger
@@ -20,6 +25,167 @@ from src.parsers.conciliacion_parser import parse_conciliacion_excel, get_pendin
 from src.matching.historical_matcher import match_historical_pendientes, summarize_historical_matches
 
 logger = get_logger(__name__)
+
+
+def _normalize_account_token(value: object) -> str:
+    token = str(value or "").strip().replace(" ", "")
+    if token.upper() in {"", "UNKNOWN", "NOENCONTRADO", "N/A", "NA", "NONE", "NULL", "NAN", "<NA>"}:
+        return ""
+    return token
+
+
+def _accounts_compatible(bank_account: object, jde_account: object) -> bool:
+    b = _normalize_account_token(bank_account)
+    j = _normalize_account_token(jde_account)
+    if not b or not j:
+        return True
+    return b == j or b.endswith(j) or j.endswith(b)
+
+
+def _normalize_tienda(value: object) -> str:
+    t = str(value or "").strip().upper()
+    if t in {"", "NO ENCONTRADO", "NAN", "NONE", "<NA>"}:
+        return ""
+    return t
+
+
+def _is_amount_close(a: object, b: object, tol: float) -> bool:
+    try:
+        return abs(float(a) - float(b)) <= float(tol)
+    except Exception:
+        return False
+
+
+def _diagnose_unmatched_row(
+    row: pd.Series,
+    opposite_df: pd.DataFrame,
+    amount_tolerance: float,
+    date_tolerance_days: int,
+    side: str,
+) -> str:
+    if opposite_df.empty:
+        return "Sin movimientos en el lado opuesto"
+
+    amount = row.get("abs_amount")
+    date = pd.to_datetime(row.get("movement_date"), errors="coerce")
+    move_type = str(row.get("movement_type") or "").strip().upper()
+    account = row.get("account_id")
+    tienda = _normalize_tienda(row.get("tienda"))
+
+    c_amount = opposite_df[
+        opposite_df["abs_amount"].apply(lambda x: _is_amount_close(x, amount, amount_tolerance))
+    ] if "abs_amount" in opposite_df.columns else pd.DataFrame()
+    if c_amount.empty:
+        return "Sin monto en tolerancia"
+
+    if pd.notnull(date) and "movement_date" in c_amount.columns:
+        opp_dates = pd.to_datetime(c_amount["movement_date"], errors="coerce")
+        c_date = c_amount[(opp_dates - date).abs().dt.days <= int(date_tolerance_days)]
+        if c_date.empty:
+            return "Monto encontrado, pero fecha fuera de tolerancia"
+    else:
+        c_date = c_amount
+
+    if move_type and "movement_type" in c_date.columns:
+        c_type = c_date[
+            c_date["movement_type"].fillna("").astype(str).str.strip().str.upper() == move_type
+        ]
+        if c_type.empty:
+            return "Monto+fecha OK, pero tipo de movimiento distinto"
+    else:
+        c_type = c_date
+
+    if "account_id" in c_type.columns:
+        c_account = c_type[
+            c_type["account_id"].apply(lambda x: _accounts_compatible(account, x))
+        ]
+        if c_account.empty:
+            return "Monto+fecha+tipo OK, pero cuenta no compatible"
+    else:
+        c_account = c_type
+
+    if tienda and "tienda" in c_account.columns:
+        c_store = c_account[
+            c_account["tienda"].apply(lambda x: _normalize_tienda(x) == tienda)
+        ]
+        if c_store.empty:
+            return "Monto+fecha+tipo+cuenta OK, pero tienda no coincide"
+    else:
+        c_store = c_account
+
+    if side == "BANK" and "tipo_banco" in row.index and "tipo_jde" in c_store.columns:
+        tipo_banco = str(row.get("tipo_banco") or "").strip().upper()
+        compat = TIPO_BANCO_TO_JDE_COMPAT.get(tipo_banco, set())
+        if compat:
+            c_pay = c_store[
+                c_store["tipo_jde"].fillna("").astype(str).str.strip().str.upper().isin(compat)
+            ]
+            if c_pay.empty:
+                return "Monto+fecha+tipo+cuenta+tienda OK, pero tipo de pago no compatible"
+
+    return "Coincidencia potencial; revisar reglas de unicidad/agrupación"
+
+
+def _add_unmatched_reason_column(
+    pending_df: pd.DataFrame,
+    opposite_full_df: pd.DataFrame,
+    amount_tolerance: float,
+    date_tolerance_days: int,
+    side: str,
+) -> pd.DataFrame:
+    if pending_df.empty:
+        return pending_df
+    out = pending_df.copy()
+    out["no_match_reason"] = out.apply(
+        lambda r: _diagnose_unmatched_row(
+            r,
+            opposite_full_df,
+            amount_tolerance=amount_tolerance,
+            date_tolerance_days=date_tolerance_days,
+            side=side,
+        ),
+        axis=1,
+    )
+    return out
+
+
+def _data_quality_metrics(df: pd.DataFrame, side: str) -> dict:
+    if df is None or df.empty:
+        return {
+            "lado": side,
+            "total": 0,
+            "cuenta_faltante": 0,
+            "desc_vacia": 0,
+            "fecha_invalida": 0,
+            "tipo_vacio": 0,
+            "tienda_vacia": 0,
+            "duplicados_clave": 0,
+        }
+
+    w = df.copy()
+    total = len(w)
+
+    cuenta_faltante = w["account_id"].apply(lambda x: _normalize_account_token(x) == "").sum() if "account_id" in w.columns else 0
+    desc_vacia = w["description"].fillna("").astype(str).str.strip().eq("").sum() if "description" in w.columns else 0
+    fecha_invalida = pd.to_datetime(w.get("movement_date"), errors="coerce").isna().sum() if "movement_date" in w.columns else 0
+
+    tipo_col = "tipo_banco" if side == "Banco" else "tipo_jde"
+    tipo_vacio = w[tipo_col].fillna("").astype(str).str.strip().eq("").sum() if tipo_col in w.columns else 0
+    tienda_vacia = w["tienda"].fillna("").astype(str).str.strip().eq("").sum() if "tienda" in w.columns else 0
+
+    key_cols = [c for c in ["account_id", "movement_date", "abs_amount", "movement_type"] if c in w.columns]
+    duplicados = w.duplicated(subset=key_cols, keep=False).sum() if key_cols else 0
+
+    return {
+        "lado": side,
+        "total": int(total),
+        "cuenta_faltante": int(cuenta_faltante),
+        "desc_vacia": int(desc_vacia),
+        "fecha_invalida": int(fecha_invalida),
+        "tipo_vacio": int(tipo_vacio),
+        "tienda_vacia": int(tienda_vacia),
+        "duplicados_clave": int(duplicados),
+    }
 
 # ════════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
@@ -109,6 +275,26 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.subheader("5. Tolerancias")
+    amount_tolerance_ui = st.number_input(
+        "Tolerancia de monto (+/-):",
+        min_value=0.0,
+        max_value=1000.0,
+        value=float(AMOUNT_TOLERANCE),
+        step=0.01,
+        format="%.2f",
+        help="Diferencia máxima permitida entre montos para considerar match.",
+    )
+    date_tolerance_ui = st.slider(
+        "Tolerancia de fecha (días):",
+        min_value=0,
+        max_value=30,
+        value=int(DATE_TOLERANCE_DAYS),
+        step=1,
+        help="Días máximos de diferencia permitidos entre fechas.",
+    )
+
+    st.markdown("---")
     run_btn = st.button(
         "▶ Conciliar",
         type="primary",
@@ -172,6 +358,8 @@ if run_btn:
                 stage1_data = run_pipeline_stage1(
                     bank_file_path=bank_paths,
                     jde_file_path=str(jde_path),
+                    amount_tolerance=float(amount_tolerance_ui),
+                    date_tolerance_days=int(date_tolerance_ui),
                 )
                 # Guardar los bytes del Papel de Trabajo DENTRO del with,
                 # antes de que el TemporaryDirectory sea destruido.
@@ -456,6 +644,77 @@ if results.get("_is_papel_trabajo"):
 
 st.markdown("---")
 
+# ── Panel de calidad de datos ─────────────────────────────────────
+bank_full_df = results.get("_bank_df_full", pd.DataFrame())
+jde_full_df = results.get("_jde_df_full", pd.DataFrame())
+
+if bank_full_df.empty:
+    bank_full_df = pd.concat([
+        results.get("conciliated_bank_movements", pd.DataFrame()),
+        results.get("pending_bank_movements", pd.DataFrame()),
+    ], ignore_index=True)
+if jde_full_df.empty:
+    jde_full_df = pd.concat([
+        results.get("conciliated_jde_movements", pd.DataFrame()),
+        results.get("pending_jde_movements", pd.DataFrame()),
+    ], ignore_index=True)
+
+with st.expander("🔎 Panel de calidad de datos", expanded=False):
+    qm_bank = _data_quality_metrics(bank_full_df, "Banco")
+    qm_jde = _data_quality_metrics(jde_full_df, "JDE")
+    qdf = pd.DataFrame([qm_bank, qm_jde])
+    qdf.columns = [
+        "Lado", "Total", "Cuenta faltante", "Descripción vacía", "Fecha inválida",
+        "Tipo vacío", "Tienda vacía", "Duplicados clave",
+    ]
+    st.dataframe(qdf, width="stretch", hide_index=True)
+    st.caption(
+        "Duplicados clave = mismos valores en cuenta + fecha + monto abs + tipo de movimiento."
+    )
+
+# ── Diagnóstico: por qué no concilió ─────────────────────────────
+diag_amount_tol = float(results.get("_amount_tolerance", amount_tolerance_ui))
+diag_date_tol = int(results.get("_date_tolerance_days", date_tolerance_ui))
+
+pending_bank_diag = _add_unmatched_reason_column(
+    results.get("pending_bank_movements", pd.DataFrame()),
+    opposite_full_df=jde_full_df,
+    amount_tolerance=diag_amount_tol,
+    date_tolerance_days=diag_date_tol,
+    side="BANK",
+)
+pending_jde_diag = _add_unmatched_reason_column(
+    results.get("pending_jde_movements", pd.DataFrame()),
+    opposite_full_df=bank_full_df,
+    amount_tolerance=diag_amount_tol,
+    date_tolerance_days=diag_date_tol,
+    side="JDE",
+)
+
+with st.expander("🧭 Explicación de por qué no concilió", expanded=False):
+    col_rb, col_rj = st.columns(2)
+    with col_rb:
+        st.markdown("**Pendientes Banco — causas**")
+        if pending_bank_diag.empty or "no_match_reason" not in pending_bank_diag.columns:
+            st.caption("Sin pendientes banco.")
+        else:
+            c = pending_bank_diag["no_match_reason"].value_counts().reset_index()
+            c.columns = ["Motivo", "Casos"]
+            st.dataframe(c, width="stretch", hide_index=True)
+    with col_rj:
+        st.markdown("**Pendientes JDE — causas**")
+        if pending_jde_diag.empty or "no_match_reason" not in pending_jde_diag.columns:
+            st.caption("Sin pendientes JDE.")
+        else:
+            c = pending_jde_diag["no_match_reason"].value_counts().reset_index()
+            c.columns = ["Motivo", "Casos"]
+            st.dataframe(c, width="stretch", hide_index=True)
+
+st.caption(
+    f"Diagnóstico con tolerancias activas: monto +/- ${diag_amount_tol:,.2f} | fecha +/- {diag_date_tol} día(s)."
+)
+st.markdown("---")
+
 _dl_cols = []
 if results.get("_excel_bytes"):
     _dl_cols.append("conciliacion")
@@ -645,14 +904,14 @@ with tab_conciliados:
 
 # ── Tab: Pendientes Banco ────────────────────────────────────
 with tab_pend_bank:
-    pend_bank = results.get("pending_bank_movements", pd.DataFrame())
+    pend_bank = pending_bank_diag
     if pend_bank.empty:
         st.success("✅ Sin movimientos bancarios pendientes.")
     else:
         st.warning(f"{len(pend_bank)} movimientos bancarios sin conciliar")
         disp = pend_bank[["account_id", "movement_date", "description",
-                           "amount_signed", "movement_type"]].copy()
-        disp.columns = ["Cuenta", "Fecha", "Descripción", "Monto", "Tipo"]
+                           "amount_signed", "movement_type", "no_match_reason"]].copy()
+        disp.columns = ["Cuenta", "Fecha", "Descripción", "Monto", "Tipo", "Por qué no concilió"]
         disp["Fecha"] = pd.to_datetime(disp["Fecha"]).dt.strftime("%d/%m/%Y")
         st.dataframe(
             disp.style.format({"Monto": "{:,.2f}"}),
@@ -662,14 +921,14 @@ with tab_pend_bank:
 
 # ── Tab: Pendientes JDE ──────────────────────────────────────
 with tab_pend_jde:
-    pend_jde = results.get("pending_jde_movements", pd.DataFrame())
+    pend_jde = pending_jde_diag
     if pend_jde.empty:
         st.success("✅ Sin movimientos JDE pendientes.")
     else:
         st.warning(f"{len(pend_jde)} movimientos JDE sin conciliar")
         disp = pend_jde[["account_id", "movement_date", "description",
-                          "amount_signed", "movement_type"]].copy()
-        disp.columns = ["Cuenta", "Fecha", "Descripción", "Monto", "Tipo"]
+                          "amount_signed", "movement_type", "no_match_reason"]].copy()
+        disp.columns = ["Cuenta", "Fecha", "Descripción", "Monto", "Tipo", "Por qué no concilió"]
         disp["Fecha"] = pd.to_datetime(disp["Fecha"]).dt.strftime("%d/%m/%Y")
         st.dataframe(
             disp.style.format({"Monto": "{:,.2f}"}),
@@ -776,27 +1035,72 @@ with tab_historicos:
                 default=["mas", "menos"],
                 key="hist_seccion_filter",
             )
+            score_min = st.slider(
+                "Score mínimo de sugerencia:",
+                min_value=0,
+                max_value=100,
+                value=0,
+                step=5,
+                key="hist_score_min",
+                help="Muestra solo sugerencias con score igual o superior al valor elegido.",
+            )
+
+            show_only_ambiguous = st.checkbox(
+                "Mostrar solo sugerencias ambiguas",
+                value=False,
+                key="hist_only_ambiguous",
+                help="Útil para revisar primero casos con más de un candidato similar.",
+            )
 
             disp_hist = matched_df[
                 matched_df["match_status"].isin(estado_sel) &
                 matched_df["section"].isin(seccion_sel)
             ].copy()
 
+            if "match_score" in disp_hist.columns:
+                disp_hist["match_score"] = pd.to_numeric(disp_hist["match_score"], errors="coerce").fillna(0)
+                disp_hist = disp_hist[disp_hist["match_score"] >= score_min]
+
+            if show_only_ambiguous and "match_ambiguous" in disp_hist.columns:
+                disp_hist = disp_hist[disp_hist["match_ambiguous"] == True]
+
+            # Orden inteligente: Estado -> Score desc -> Fecha histórica asc.
+            status_rank = {
+                "AUN_PENDIENTE": 0,
+                "PENDIENTE_BANCO": 1,
+                "PENDIENTE_JDE": 2,
+                "CONCILIADO": 3,
+            }
+            disp_hist["_status_rank"] = disp_hist["match_status"].map(status_rank).fillna(99)
+            disp_hist["_score_sort"] = pd.to_numeric(disp_hist.get("match_score", 0), errors="coerce").fillna(0)
+            disp_hist = disp_hist.sort_values(
+                by=["_status_rank", "_score_sort", "movement_date"],
+                ascending=[True, False, True],
+            ).drop(columns=["_status_rank", "_score_sort"], errors="ignore")
+
             if disp_hist.empty:
                 st.info("No hay registros con los filtros seleccionados.")
             else:
                 # Formatear para visualización
-                disp_h = disp_hist[[
+                display_cols = [
                     "account_id", "section", "movement_date",
                     "description", "abs_amount", "type_code",
                     "match_status", "match_detail", "match_date", "match_amount",
-                ]].copy()
+                    "match_source", "match_score", "match_candidates_count", "match_ambiguous", "match_reason",
+                ]
+                disp_h = disp_hist.reindex(columns=display_cols).copy()
 
                 disp_h.columns = [
                     "Cuenta", "Sección", "Fecha Hist.",
                     "Descripción (histórico)", "Monto Hist.", "Tipo",
                     "Estado", "Desc. Período Actual", "Fecha Actual", "Monto Actual",
+                    "Fuente Match", "Score", "# Candidatos", "Ambiguo", "Razón Match",
                 ]
+
+                if "Ambiguo" in disp_h.columns:
+                    disp_h["Ambiguo"] = disp_h["Ambiguo"].apply(
+                        lambda v: "SI" if bool(v) else "NO"
+                    )
 
                 # Formateo fechas
                 for col_f in ("Fecha Hist.", "Fecha Actual"):
@@ -822,6 +1126,7 @@ with tab_historicos:
                     .format({
                         "Monto Hist.":   "{:,.2f}",
                         "Monto Actual":  lambda x: f"{x:,.2f}" if pd.notnull(x) and x == x else "",
+                        "Score":        lambda x: f"{float(x):.1f}" if pd.notnull(x) and str(x).strip() != "" else "",
                     })
                 )
 
