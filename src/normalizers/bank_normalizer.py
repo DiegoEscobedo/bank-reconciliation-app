@@ -128,7 +128,7 @@ class BankNormalizer:
             return -abs(deposit_val)
 
         if withdrawal_present and not deposit_present and withdrawal_val > 0:
-            return abs(withdrawal_val)
+            return -abs(withdrawal_val)
 
         if deposit_val != 0.0:
             return abs(deposit_val)
