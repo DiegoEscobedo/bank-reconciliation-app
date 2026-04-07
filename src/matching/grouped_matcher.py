@@ -24,6 +24,66 @@ class GroupedMatcher:
 			return ""
 		return str(value).strip().upper()
 
+	@staticmethod
+	def _normalize_text(value) -> str:
+		if pd.isna(value):
+			return ""
+		text = str(value).strip().upper()
+		return (
+			text.replace("Á", "A")
+			.replace("É", "E")
+			.replace("Í", "I")
+			.replace("Ó", "O")
+			.replace("Ú", "U")
+		)
+
+	@classmethod
+	def _is_cargo_por_dispersion(cls, value) -> bool:
+		text = cls._normalize_text(value)
+		return "CARGO POR DISPERSION" in text or "CARGO DISPERSION" in text
+
+	@classmethod
+	def _is_nomina_jde_row(cls, row) -> bool:
+		tipo = cls._normalize_text(row.get("tipo_jde", "") if hasattr(row, "get") else "")
+		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		return tipo == "NOMINA" or "NOMINA" in desc
+
+	def _apply_dispersion_nomina_rule_forward(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
+		"""
+		Regla de negocio: si el banco es CARGO POR DISPERSION,
+		solo puede agrupar contra movimientos JDE de NOMINA.
+		"""
+		bank_desc = ""
+		try:
+			bank_desc = bank_row.get("description") if hasattr(bank_row, "get") else bank_row["description"]
+		except (KeyError, TypeError):
+			pass
+
+		if not self._is_cargo_por_dispersion(bank_desc):
+			return candidates
+
+		if candidates.empty:
+			return candidates
+
+		nomina_mask = candidates.apply(self._is_nomina_jde_row, axis=1)
+		return candidates[nomina_mask].copy()
+
+	def _apply_dispersion_nomina_rule_reverse(self, candidates: "pd.DataFrame", jde_row) -> "pd.DataFrame":
+		"""
+		Regla simetrica para agrupacion inversa:
+		- JDE NOMINA -> solo bancos CARGO POR DISPERSION.
+		- JDE no NOMINA -> excluir bancos CARGO POR DISPERSION.
+		"""
+		if candidates.empty or "description" not in candidates.columns:
+			return candidates
+
+		jde_es_nomina = self._is_nomina_jde_row(jde_row)
+		bank_dispersion_mask = candidates["description"].apply(self._is_cargo_por_dispersion)
+
+		if jde_es_nomina:
+			return candidates[bank_dispersion_mask].copy()
+		return candidates[~bank_dispersion_mask].copy()
+
 	def _enforce_strict_tienda(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
 		"""
 		Regla estricta de tienda para agrupaciones:
@@ -124,6 +184,8 @@ class GroupedMatcher:
 
 			# Refinar por comision (simetrico)
 			available_jde = self.engine._filter_by_comision(available_jde, bank_row)
+			# Regla: CARGO POR DISPERSION solo con NOMINA
+			available_jde = self._apply_dispersion_nomina_rule_forward(available_jde, bank_row)
 
 			# Tienda estricta para agrupaciones
 			available_jde = self._enforce_strict_tienda(available_jde, bank_row)
@@ -206,6 +268,8 @@ class GroupedMatcher:
 
 				# Refinar por comision (simetrico)
 				alt_jde = self.engine._filter_by_comision(alt_jde, bank_row)
+				# Regla: CARGO POR DISPERSION solo con NOMINA
+				alt_jde = self._apply_dispersion_nomina_rule_forward(alt_jde, bank_row)
 
 				# Tienda estricta para agrupaciones
 				alt_jde = self._enforce_strict_tienda(alt_jde, bank_row)
@@ -371,6 +435,12 @@ class GroupedMatcher:
 				& (bank_dataframe["movement_type"] == jde_mvtype)
 				& (bank_dataframe["abs_amount"] < target_amount - self.engine.amount_tolerance)
 			].copy()
+
+			if len(available_bank) < 2:
+				continue
+
+			# Regla simetrica: NOMINA <-> CARGO POR DISPERSION
+			available_bank = self._apply_dispersion_nomina_rule_reverse(available_bank, jde_row)
 
 			if len(available_bank) < 2:
 				continue

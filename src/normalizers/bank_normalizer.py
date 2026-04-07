@@ -119,6 +119,17 @@ class BankNormalizer:
         deposit_val    = clean_amount(raw_deposit)
         withdrawal_val = clean_amount(raw_withdrawal)
 
+        deposit_present = (not is_empty_amount(raw_deposit)) and deposit_val != 0.0
+        withdrawal_present = (not is_empty_amount(raw_withdrawal)) and withdrawal_val != 0.0
+
+        # Corrección conservadora: si solo existe una columna con monto y su
+        # signo contradice la naturaleza de la columna, respetar el signo real.
+        if deposit_present and not withdrawal_present and deposit_val < 0:
+            return -abs(deposit_val)
+
+        if withdrawal_present and not deposit_present and withdrawal_val > 0:
+            return abs(withdrawal_val)
+
         if deposit_val != 0.0:
             return abs(deposit_val)
 

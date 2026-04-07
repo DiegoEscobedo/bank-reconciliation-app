@@ -6,6 +6,101 @@ from src.matching.reconciliation_engine import ReconciliationEngine
 
 
 class TestGroupedRefactorRegression(unittest.TestCase):
+
+    def test_forward_grouped_cargo_por_dispersion_only_uses_nomina(self):
+        engine = ReconciliationEngine()
+        engine.forward_grouped_min_size = 2
+
+        bank_df = pd.DataFrame([
+            {
+                "abs_amount": 100.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "CARGO POR DISPERSION NOMINA",
+                "tienda": "",
+                "tipo_banco": "",
+                "raw_deposit": 100.0,
+            }
+        ])
+
+        # Sin la regla, el agrupador podia usar la comision para completar monto.
+        jde_df = pd.DataFrame([
+            {
+                "abs_amount": 70.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "NOMINA SEMANAL",
+                "tienda": "",
+                "tipo_jde": "",
+                "raw_deposit": 70.0,
+            },
+            {
+                "abs_amount": 30.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "COMISION BANCARIA",
+                "tienda": "",
+                "tipo_jde": "",
+                "raw_deposit": 30.0,
+            },
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        proposals = interactive["proposed_grouped_matches"]
+
+        self.assertEqual(len(proposals), 0)
+
+    def test_reverse_grouped_nomina_only_uses_cargo_por_dispersion(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "abs_amount": 70.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "CARGO POR DISPERSION NOMINA",
+                "tienda": "",
+                "tipo_banco": "",
+                "raw_deposit": 70.0,
+            },
+            {
+                "abs_amount": 30.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "COMISION BANCARIA",
+                "tienda": "",
+                "tipo_banco": "",
+                "raw_deposit": 30.0,
+            },
+            {
+                "abs_amount": 30.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "CARGO DISPERSION COMPLEMENTO",
+                "tienda": "",
+                "tipo_banco": "",
+                "raw_deposit": 30.0,
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "abs_amount": 100.0,
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "movement_type": "WDR",
+                "description": "NOMINA QUINCENAL",
+                "tienda": "",
+                "tipo_jde": "",
+                "raw_deposit": 100.0,
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 2})
+
     def test_forward_grouped_does_not_propose_single_row_group(self):
         engine = ReconciliationEngine()
         engine.forward_grouped_min_size = 2
