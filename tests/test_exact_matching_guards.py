@@ -292,5 +292,98 @@ class TestExactMatchingGuards(unittest.TestCase):
         result = engine.reconcile(bank_df, jde_df)
         self.assertEqual(result["summary"]["exact_matches_count"], 1)
 
+    def test_exact_matches_when_bank_account_has_float_suffix(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "20305077133.0",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "SPEI TRASPASO",
+                "amount_signed": -350000.0,
+                "abs_amount": 350000.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "13 TRASPASO ALA",
+                "doc_type": "AA",
+                "document": "2756125",
+                "amount_signed": -350000.0,
+                "abs_amount": 350000.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "NO ENCONTRADO",
+                "tipo_jde": "03",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 1)
+
+    def test_exact_prioritizes_bank_rows_with_fewer_candidates(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "UNKNOWN",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "mov flexible",
+                "amount_signed": -100.0,
+                "abs_amount": 100.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+            },
+            {
+                "account_id": "1234",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "mov restringido",
+                "amount_signed": -100.0,
+                "abs_amount": 100.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "tienda": "",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "1234",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "jde cuenta 1234",
+                "doc_type": "AA",
+                "document": "1",
+                "amount_signed": -100.0,
+                "abs_amount": 100.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "",
+                "tipo_jde": "03",
+            },
+            {
+                "account_id": "5678",
+                "movement_date": pd.Timestamp("2026-04-01"),
+                "description": "jde cuenta 5678",
+                "doc_type": "AA",
+                "document": "2",
+                "amount_signed": -100.0,
+                "abs_amount": 100.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "",
+                "tipo_jde": "03",
+            },
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 2)
+
 if __name__ == "__main__":
     unittest.main()

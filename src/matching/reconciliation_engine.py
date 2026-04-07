@@ -386,6 +386,13 @@ class ReconciliationEngine:
         token = str(value).strip().replace(" ", "")
         if token.upper() in {"UNKNOWN", "NOENCONTRADO", "N/A", "NA", "NONE", "NULL", "NAN", "<NA>"}:
             return ""
+        # Algunos orígenes Excel traen cuentas numéricas como texto float (ej. 20305077133.0).
+        if re.fullmatch(r"\d+\.0+", token):
+            token = token.split(".", 1)[0]
+
+        digits_only = re.sub(r"\D", "", token)
+        if digits_only:
+            return digits_only
         return token
 
     @classmethod
@@ -454,6 +461,8 @@ class ReconciliationEngine:
     def _perform_exact_matching(self, bank_dataframe, jde_dataframe):
 
         exact_matches = []
+
+        bank_candidate_pool = []
 
         for bank_index, bank_row in bank_dataframe.iterrows():
 
@@ -558,34 +567,47 @@ class ReconciliationEngine:
             if "jde_tienda" in potential_jde_candidates.columns:
                 potential_jde_candidates = potential_jde_candidates.drop(columns=["jde_tienda"])
 
+            amount_filtered_candidates = []
             for jde_index, jde_row in potential_jde_candidates.iterrows():
+                jde_amount = round(jde_row["abs_amount"], self.rounding_decimals)
+                if self._is_amount_within_tolerance(bank_amount, jde_amount):
+                    amount_filtered_candidates.append((jde_index, jde_amount))
 
-                jde_amount = round(
-                    jde_row["abs_amount"],
+            bank_candidate_pool.append({
+                "bank_index": bank_index,
+                "bank_amount": bank_amount,
+                "candidates": amount_filtered_candidates,
+            })
+
+        # Resolver conflictos priorizando filas banco con menos candidatos exactos.
+        bank_candidate_pool.sort(
+            key=lambda item: (len(item["candidates"]), item["bank_index"])
+        )
+
+        for item in bank_candidate_pool:
+            bank_index = item["bank_index"]
+            if bank_dataframe.at[bank_index, "is_matched"]:
+                continue
+
+            for jde_index, jde_amount in item["candidates"]:
+                if jde_dataframe.at[jde_index, "is_matched"]:
+                    continue
+
+                bank_dataframe.at[bank_index, "is_matched"] = True
+                jde_dataframe.at[jde_index, "is_matched"] = True
+
+                amount_difference = round(
+                    item["bank_amount"] - jde_amount,
                     self.rounding_decimals
                 )
 
-                if self._is_amount_within_tolerance(
-                        bank_amount,
-                        jde_amount
-                ):
-
-                    bank_dataframe.at[bank_index, "is_matched"] = True
-                    jde_dataframe.at[jde_index, "is_matched"] = True
-
-                    amount_difference = round(
-                        bank_amount - jde_amount,
-                        self.rounding_decimals
-                    )
-
-                    exact_matches.append({
-                        "match_type": "exact",
-                        "bank_row_index": bank_index,
-                        "jde_row_index": jde_index,
-                        "amount_difference": amount_difference
-                    })
-
-                    break
+                exact_matches.append({
+                    "match_type": "exact",
+                    "bank_row_index": bank_index,
+                    "jde_row_index": jde_index,
+                    "amount_difference": amount_difference
+                })
+                break
 
         return exact_matches
 

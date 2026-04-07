@@ -255,7 +255,8 @@ class PapelTrabajoParser:
 
         # ── Filtrar solo pendientes ──────────────────────────
         if col_conc:
-            pending_mask = s(col_conc).isin(["", "nan", "None", "NaT"])
+            conc_values = s(col_conc).str.strip().str.upper()
+            pending_mask = conc_values.isin(["", "NAN", "NONE", "NAT", "0", "0.0"])
             df = df[pending_mask].copy().reset_index(drop=True)
 
         if df.empty:

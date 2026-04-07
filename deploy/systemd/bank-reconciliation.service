@@ -1,0 +1,18 @@
+[Unit]
+Description=Bank Reconciliation Streamlit App
+After=network.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/bank-reconciliation-app
+Environment="PATH=/opt/bank-reconciliation-app/.venv/bin"
+ExecStart=/opt/bank-reconciliation-app/.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/bank-reconciliation/app.log
+StandardError=append:/var/log/bank-reconciliation/app.err.log
+
+[Install]
+WantedBy=multi-user.target

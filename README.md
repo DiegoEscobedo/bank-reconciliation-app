@@ -78,6 +78,21 @@ python main.py --bank  data/raw/bank/estado_cuenta.xlsx \
                --output data/output/reconciliations/
 ```
 
+### Despliegue en servidor propio
+
+Se agregó una guía y plantillas en la carpeta `deploy` para montar la app en Linux con `systemd + Nginx + SSL`:
+
+- `deploy/README_SERVER.md`
+- `deploy/systemd/bank-reconciliation.service`
+- `deploy/nginx/bank-reconciliation.conf`
+- `deploy/scripts/deploy.sh`
+
+Esto **no cambia** tu flujo local. Puedes seguir ejecutando en tu equipo con:
+
+```bash
+streamlit run app.py
+```
+
 ---
 
 ## Formato de archivos de entrada
