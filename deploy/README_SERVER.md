@@ -1,6 +1,6 @@
 # Deploy en Servidor Propio (Ubuntu + Nginx + systemd)
 
-Este setup no rompe tu flujo local. Puedes seguir ejecutando en local con:
+Este setup no rompe tu flujo local
 
 streamlit run app.py
 

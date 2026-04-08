@@ -517,6 +517,7 @@ if st.session_state.get("phase") == "validating":
     # ── Agrupaciones inversas: N banco → 1 JDE ──────────────────────
     if rev_proposals:
         st.subheader("🔄 N banco → 1 JDE (comisiones y otros)")
+
     for proposal in rev_proposals:
         gid       = proposal["group_id"]
         jde_snap  = proposal["jde_snapshot"]

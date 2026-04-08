@@ -17,6 +17,7 @@ class GroupedMatcher:
 
 	def __init__(self, engine):
 		self.engine = engine
+		self._commission_codes_6614 = {"537", "517", "600", "601"}
 
 	@staticmethod
 	def _normalize_tienda(value) -> str:
@@ -36,6 +37,60 @@ class GroupedMatcher:
 			.replace("Ó", "O")
 			.replace("Ú", "U")
 		)
+
+	@staticmethod
+	def _normalize_code(value) -> str:
+		if pd.isna(value):
+			return ""
+		text = str(value).strip()
+		if text.endswith(".0"):
+			text = text[:-2]
+		return "".join(ch for ch in text if ch.isdigit())
+
+	@staticmethod
+	def _is_account_6614(value) -> bool:
+		if pd.isna(value):
+			return False
+		text = str(value).strip().replace(" ", "")
+		if text.endswith(".0"):
+			text = text[:-2]
+		digits = "".join(ch for ch in text if ch.isdigit())
+		return digits.endswith("6614")
+
+	@classmethod
+	def _is_jde_commission_row(cls, row) -> bool:
+		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
+		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		return mvtype == "COM" or "COMISION" in desc
+
+	@classmethod
+	def _is_bank_commission_row(cls, row) -> bool:
+		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
+		code = cls._normalize_code(row.get("cod_transac", "") if hasattr(row, "get") else "")
+		return "COMISION" in desc or mvtype == "COM" or code in {"537", "517", "600", "601"}
+
+	def _get_6614_commission_candidates(self, available_bank: "pd.DataFrame", jde_row) -> "pd.DataFrame":
+		"""
+		Sesgo opcional para 6614:
+		- Solo aplica a filas JDE de comisión.
+		- Toma solo movimientos banco 6614 con COD. TRANSAC en {537,517,600,601}.
+		Si no aplica o no hay columnas requeridas, retorna DataFrame vacío.
+		"""
+		if available_bank.empty:
+			return available_bank.iloc[0:0].copy()
+
+		if not self._is_jde_commission_row(jde_row):
+			return available_bank.iloc[0:0].copy()
+
+		if "account_id" not in available_bank.columns or "cod_transac" not in available_bank.columns:
+			return available_bank.iloc[0:0].copy()
+
+		is_6614 = available_bank["account_id"].apply(self._is_account_6614)
+		code_mask = available_bank["cod_transac"].apply(
+			lambda v: self._normalize_code(v) in self._commission_codes_6614
+		)
+		return available_bank[is_6614 & code_mask].copy()
 
 	@classmethod
 	def _is_cargo_por_dispersion(cls, value) -> bool:
@@ -425,16 +480,30 @@ class GroupedMatcher:
 			target_amount = round(jde_row["abs_amount"], self.engine.rounding_decimals)
 			jde_date = jde_row["movement_date"]
 			jde_mvtype = jde_row.get("movement_type", "")
+			jde_is_commission = self._is_jde_commission_row(jde_row)
 
-			# Candidatos bancarios: pendientes, mismo tipo, dentro de fecha,
-			# cada uno menor que el total JDE (si fuera igual, exacto ya matcheo)
+			# Candidatos base: pendientes, dentro de fecha y cada uno menor que
+			# el total JDE (si fuera igual, exacto ya matcheo).
 			available_bank = bank_dataframe[
 				(~bank_dataframe["is_matched"])
 				& (~bank_dataframe.index.isin(claimed_bank))
 				& (self.engine._is_date_within_tolerance(jde_date, bank_dataframe["movement_date"]))
-				& (bank_dataframe["movement_type"] == jde_mvtype)
 				& (bank_dataframe["abs_amount"] < target_amount - self.engine.amount_tolerance)
 			].copy()
+
+			if jde_is_commission:
+				# En datos reales banco, las comisiones llegan como RETIRO.
+				# Permitir RETIRO/COM y reforzar por descripcion de comision.
+				bank_mvtype = available_bank["movement_type"].fillna("").astype(str).str.strip().str.upper()
+				available_bank = available_bank[bank_mvtype.isin(["RETIRO", "COM", "WDR"])].copy()
+				if not available_bank.empty:
+					commission_mask = available_bank.apply(self._is_bank_commission_row, axis=1)
+					if commission_mask.any():
+						available_bank = available_bank[commission_mask].copy()
+			else:
+				available_bank = available_bank[
+					available_bank["movement_type"] == jde_mvtype
+				].copy()
 
 			if len(available_bank) < 2:
 				continue
@@ -491,13 +560,35 @@ class GroupedMatcher:
 			if len(available_bank) < 2:
 				continue
 
-			candidate_rows = list(
-				available_bank.nsmallest(
-					self.engine.grouped_candidate_limit,
-					"abs_amount",
-				).iterrows()
-			)
-			result = self.find_subset_sum_with_limit(candidate_rows, target_amount)
+			# Sesgo 6614 comisiones: intentar primero subset solo con codigos
+			# de comision (537/517/600/601). Si no cuadra, fallback normal.
+			result = None
+			used_bias_6614 = False
+			bias_candidates = self._get_6614_commission_candidates(available_bank, jde_row)
+			if len(bias_candidates) >= 2:
+				# En 6614 comisiones, los grupos pueden requerir muchas piezas
+				# (p. ej. multiples 100 + 16 + 5 + 0.8). No recortar por nsmallest.
+				biased_rows = list(bias_candidates.iterrows())
+				# Sin limite artificial de tamano de grupo en este sesgo.
+				# El limite real queda dado por el total de candidatos con cod_transac objetivo.
+				dynamic_max_group_size = len(biased_rows)
+				bias_result = self.find_subset_sum_with_limit(
+					biased_rows,
+					target_amount,
+					max_group_size=dynamic_max_group_size,
+				)
+				if bias_result is not None and len(bias_result) >= 2:
+					result = bias_result
+					used_bias_6614 = True
+
+			if result is None:
+				candidate_rows = list(
+					available_bank.nsmallest(
+						self.engine.grouped_candidate_limit,
+						"abs_amount",
+					).iterrows()
+				)
+				result = self.find_subset_sum_with_limit(candidate_rows, target_amount)
 
 			if result is None or len(result) < 2:
 				continue
@@ -522,6 +613,11 @@ class GroupedMatcher:
 				"bank_count": len(bank_indices),
 			})
 			group_id += 1
+			if used_bias_6614:
+				logger.info(
+					"[REV-GROUPED-6614-BIAS] JDE idx=%d conciliado con sesgo COD.TRANSAC 537/517/600/601",
+					jde_index,
+				)
 			logger.info(
 				"[REV-GROUPED] JDE idx=%d  amt=%.2f -> %d filas banco  diff=%.2f",
 				jde_index, target_amount, len(bank_indices), diff,
@@ -529,7 +625,7 @@ class GroupedMatcher:
 
 		return proposals
 
-	def find_subset_sum_with_limit(self, candidate_rows, target_amount):
+	def find_subset_sum_with_limit(self, candidate_rows, target_amount, max_group_size=None):
 		"""
 		Encuentra un subconjunto de candidate_rows cuya suma sea lo mas
 		cercano posible al target_amount (dentro de tolerancia).
@@ -556,6 +652,11 @@ class GroupedMatcher:
 
 		best_result = None
 		best_diff = float("inf")
+		effective_max_group_size = (
+			self.engine.maximum_group_size
+			if max_group_size is None
+			else max(1, int(max_group_size))
+		)
 
 		def backtracking_search(
 			start_position,
@@ -564,7 +665,7 @@ class GroupedMatcher:
 		):
 			nonlocal best_result, best_diff
 
-			if len(current_combination) > self.engine.maximum_group_size:
+			if len(current_combination) > effective_max_group_size:
 				return
 
 			current_diff = abs(round(current_sum - target_amount, self.engine.rounding_decimals))

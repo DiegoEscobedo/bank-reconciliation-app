@@ -3,11 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.3 |
-| Fecha | 30/03/2026 |
+| Versión | 1.4 |
+| Fecha | 08/04/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
-| Cambios | Histórico estricto por cuenta, filtro MercadoPago por grupos de color (total vs Scotiabank), write-back con aislamiento por cuenta |
+| Cambios | Prioridad de exactos por unicidad, CONCILIADO=0 como pendiente, normalización de cuenta `.0`, regla CARGO POR DISPERSION↔NOMINA, normalización conservadora de signo, guías de deploy |
 
 ---
 
@@ -195,7 +195,7 @@ def parse(file_path: str) -> DataFrame:
 | `PapelTrabajoParser` | Excel con Aux_Fact | Solo 6614, 7133 |
 
 **Comportamiento de `PapelTrabajoParser`:**
-- Solo carga filas donde `CONCILIADO` está vacío (ya conciliadas se ignoran).
+- Carga filas pendientes cuando `CONCILIADO` está vacío o contiene valores equivalentes a pendiente (`0`, `0.0`).
 - Extrae `Aux_Fact` para el proceso de write-back posterior.
 - Mapea nombres de tienda usando `TIENDA_ABBREV`.
 - Si encabezado no encontrado, error descriptivo indicando hojas disponibles.
@@ -211,6 +211,9 @@ def parse(file_path: str) -> DataFrame:
 - Convierte `movement_date` a `datetime64`.
 - Calcula `abs_amount = abs(amount_signed)`.
 - Asigna `source = "BANK"`.
+- Corrige inconsistencias de signo/columna en casos contradictorios:
+    - Depósito negativo sin retiro informado se interpreta como retiro.
+    - Retiro positivo sin depósito informado se interpreta como retiro (negativo).
 
 **`JDENormalizer.normalize(df)`:**
 - Misma lógica adaptada a la estructura JDE.
@@ -259,7 +262,8 @@ Aprueba todas las agrupaciones automáticamente. Usado en CLI.
 ```
 Fase 1: reconcile_interactive(bank_df, jde_df)
     1. Copia los DataFrames y añade columna is_matched=False
-    2. _perform_exact_matching → marca is_matched en los matcheados
+     2. _perform_exact_matching → marca is_matched en los matcheados
+         con priorización por menor número de candidatos exactos
     3. _propose_grouped_matches → genera propuestas sin aplicarlas
     Retorna: dict con exact_matches + proposed_grouped_matches
 
@@ -277,16 +281,31 @@ Fase 2: confirm_grouped_matches(interactive_result, approved_group_ids)
 - Si el banco NO tiene tienda → RECHAZA JDE con tienda definida (previene ambigüedad).
 - Solo se aceptan: (ambos vacios) O (ambos con misma tienda).
 - **Objetivo:** Máxima precisión en matches 1:1.
+- Compatibilidad de cuenta por sufijo (cuenta larga/corta), con normalización robusta para entradas numéricas como texto float (`20305077133.0`).
+- Resolución de unicidad por prioridad: primero se asignan los movimientos de banco con menos candidatos exactos.
 
 **Matching Agrupado Forward (1:N) - Flexible con validación final:**
 - **Durante búsqueda:** Mayor flexibilidad para encontrar agrupaciones potenciales.
 - **Al confirmar (Fase 2):** Si TODOS los JDE de la agrupación son de UNA tienda diferente al banco → **RECHAZA automáticamente**.
 - **Objetivo:** Evitar falsos positivos que agrupan movimientos de tienda "A" con banco de tienda "B".
+- Regla de negocio adicional: movimientos banco tipo CARGO POR DISPERSION solo pueden agruparse con JDE de NOMINA.
 
 **Matching Inverso (N→1):**
 - Si bancos provienen de múltiples tiendas → **RECHAZA** (falso positivo evidente).
 - Si todos bancos de tienda "A" pero JDE de tienda "B" → **RECHAZA**.
 - **Objetivo:** Garantizar que agrupaciones inversas sean de tienda coherente.
+- Regla de negocio simétrica: si JDE es NOMINA, solo considera bancos CARGO POR DISPERSION.
+
+---
+
+### 4.7 Guías de despliegue
+
+Se agregan artefactos operativos para despliegue en servidor Linux sin afectar ejecución local:
+
+- `deploy/systemd/bank-reconciliation.service`
+- `deploy/nginx/bank-reconciliation.conf`
+- `deploy/scripts/deploy.sh`
+- `deploy/README_SERVER.md`
 
 #### Estructura del dict de resultados
 

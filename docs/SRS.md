@@ -3,11 +3,11 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 1.3 |
-| Fecha | 30/03/2026 |
+| Versión | 1.4 |
+| Fecha | 08/04/2026 |
 | Autor | Diego Escobedo |
 | Estado | Vigente |
-| Cambios | Histórico estricto por cuenta, filtro MercadoPago por grupos de color, write-back con aislamiento por cuenta |
+| Cambios | Prioridad de exactos por unicidad, CONCILIADO=0 como pendiente, normalización de cuenta `.0`, regla CARGO POR DISPERSION↔NOMINA, normalización conservadora de signo, guías de deploy |
 
 ---
 
@@ -119,7 +119,7 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - Para CSV: lee el encabezado a partir de la fila 3, extrae fecha, cuenta, monto, tipo de documento y descripción.
 - Para Papel de Trabajo Excel:
   - Detecta automáticamente si es Excel con estructura Papel de Trabajo (presencia de columna `Aux_Fact`).
-  - Omite filas donde la columna `CONCILIADO` ya tenga valor (filas ya conciliadas en el pasado).
+  - Omite filas ya conciliadas y conserva como pendientes filas con `CONCILIADO` vacío o en `0`/`0.0`.
   - Extrae el identificador `Aux_Fact` para poder marcar archivos durante el write-back.
   - Valida que tenga las columnas requeridas (`Aux_Fact`, `Importe`, `CONCILIADO`, `FECHA CONCILIACION`).
 - Ambos formatos producen el mismo esquema de columnas normalizado.
@@ -142,6 +142,11 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 | `abs_amount` | float | Valor absoluto del monto |
 | `movement_type` | string | Tipo de movimiento |
 | `source` | string | `BANK` o `JDE` |
+
+**Reglas adicionales implementadas de normalización bancaria:**
+- Si un monto aparece en columna de retiro, se normaliza con signo negativo.
+- Si un monto aparece en columna de depósito con signo negativo y no existe retiro, se conserva el signo negativo.
+- Se previenen inconsistencias por signos contradictorios entre columna y valor.
 
 ---
 
@@ -169,6 +174,8 @@ El sistema es una aplicación standalone Python que opera en dos modos:
   - Si el banco NO tiene tienda, NO acepta JDE con tienda definida (previene matches ambiguos).
   - Solo se aceptan matches exactos cuando ambos carecen de tienda O ambos tienen la misma tienda.
 - Filtrado por tipo: Si el movimiento bancario es de comisión, solo se emparejan con movimientos JDE que también sean comisión.
+- Compatibilidad de cuenta por equivalencia de sufijo y normalización robusta de tokens numéricos (incluye cuentas con formato texto-float, por ejemplo `20305077133.0`).
+- Resolución de conflictos de unicidad: cuando hay múltiples candidatos exactos, el sistema prioriza emparejar primero los movimientos de banco con menor número de candidatos válidos.
 - Cada movimiento solo puede participar en un match (no se reutilizan).
 - Los movimientos matcheados se marcan como `is_matched = True`.
 
@@ -202,6 +209,9 @@ El sistema es una aplicación standalone Python que opera en dos modos:
   - Validación de tienda: Si TODOS los JDE de la agrupación son de UNA tienda diferente a la tienda del banco → RECHAZA automáticamente (previene falsos positivos).
   - Si bancos o JDE carecen de tienda, se aceptan sin restricción.
 - Las agrupaciones se presentan como **propuestas**; el usuario las aprueba o rechaza antes de confirmar.
+- Regla de negocio específica implementada:
+  - Banco CARGO POR DISPERSION solo puede agrupar con JDE NOMINA.
+  - En agrupación inversa, JDE NOMINA solo puede usar bancos CARGO POR DISPERSION.
 
 ---
 
@@ -270,6 +280,19 @@ El sistema es una aplicación standalone Python que opera en dos modos:
 - Exige misma cuenta en el cruce histórico (modo estricto fijo), aceptando equivalencia por sufijo para cuenta larga/corta.
 - Clasifica en `CONCILIADO`, `PENDIENTE_BANCO`, `PENDIENTE_JDE`, `AUN_PENDIENTE`.
 - No modifica la conciliación del período actual ni ejecuta write-back; solo muestra métricas/tablas y permite descarga del análisis.
+
+---
+
+### RF-13 — Soporte de despliegue en servidor propio
+
+**Descripción:** El proyecto debe incluir artefactos de referencia para despliegue en servidor Linux sin afectar operación local.
+
+**Criterios de aceptación:**
+- Existe una guía de despliegue en `deploy/README_SERVER.md`.
+- Existe unidad systemd de referencia en `deploy/systemd/bank-reconciliation.service`.
+- Existe configuración Nginx de referencia en `deploy/nginx/bank-reconciliation.conf`.
+- Existe script de actualización operativa en `deploy/scripts/deploy.sh`.
+- La ejecución local se mantiene con `streamlit run app.py` sin dependencias del despliegue.
 
 ---
 

@@ -98,6 +98,20 @@ class BankNormalizer:
             df["bank"] = df["bank"].fillna("").astype(str).str.strip()
             base_cols.append("bank")
 
+        # Preservar COD. TRANSAC para sesgos de comisiones (ej. cuenta 6614).
+        if "raw_cod_transac" in df.columns:
+            df["cod_transac"] = (
+                df["raw_cod_transac"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\.0+$", "", regex=True)
+            )
+            base_cols.append("cod_transac")
+        elif "cod_transac" in df.columns:
+            df["cod_transac"] = df["cod_transac"].fillna("").astype(str).str.strip()
+            base_cols.append("cod_transac")
+
         result = df[base_cols].reset_index(drop=True)
 
         logger.info("[BANK] Movimientos normalizados: %d", len(result))

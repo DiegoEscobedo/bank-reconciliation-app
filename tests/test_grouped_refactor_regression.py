@@ -335,6 +335,200 @@ class TestGroupedRefactorRegression(unittest.TestCase):
         self.assertEqual(result["summary"]["pending_bank_count"], 0)
         self.assertEqual(result["summary"]["pending_jde_count"], 0)
 
+    def test_reverse_grouped_6614_commission_code_bias_prefers_cod_transac_subset(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "cod_transac": "537",
+                "abs_amount": 10.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision codigo 537",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+            {
+                "account_id": "6614",
+                "cod_transac": "517",
+                "abs_amount": 7.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision codigo 517",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+            {
+                "account_id": "6614",
+                "cod_transac": "999",
+                "abs_amount": 12.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision sin codigo sesgo",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "abs_amount": 17.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "COMISION AGRUPADA",
+                "tienda": "",
+                "tipo_jde": "03",
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 1})
+
+    def test_reverse_grouped_6614_commission_code_bias_falls_back_when_no_subset(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "cod_transac": "537",
+                "abs_amount": 10.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision codigo 537",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+            {
+                "account_id": "6614",
+                "cod_transac": "517",
+                "abs_amount": 6.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision codigo 517",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+            {
+                "account_id": "6614",
+                "cod_transac": "999",
+                "abs_amount": 7.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "comision sin codigo sesgo",
+                "tienda": "",
+                "tipo_banco": "03",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "abs_amount": 17.0,
+                "movement_date": pd.Timestamp("2026-03-02"),
+                "movement_type": "COM",
+                "description": "COMISION AGRUPADA",
+                "tienda": "",
+                "tipo_jde": "03",
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 2})
+
+    def test_reverse_grouped_6614_commission_with_retiro_movement_types(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "cod_transac": "600",
+                "abs_amount": 12.0,
+                "movement_date": pd.Timestamp("2026-03-05"),
+                "movement_type": "RETIRO",
+                "description": "comision servicio",
+                "tienda": "",
+                "tipo_banco": "",
+            },
+            {
+                "account_id": "6614",
+                "cod_transac": "601",
+                "abs_amount": 8.0,
+                "movement_date": pd.Timestamp("2026-03-05"),
+                "movement_type": "RETIRO",
+                "description": "comision iva",
+                "tienda": "",
+                "tipo_banco": "",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "abs_amount": 20.0,
+                "movement_date": pd.Timestamp("2026-03-05"),
+                "movement_type": "RETIRO",
+                "description": "COMISION AGRUPADA BANCARIA",
+                "tienda": "",
+                "tipo_jde": "",
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 1})
+
+    def test_reverse_grouped_6614_commission_accepts_cod_transac_without_comision_word(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "0884166614",
+                "cod_transac": "600",
+                "abs_amount": 100.0,
+                "movement_date": pd.Timestamp("2026-04-07"),
+                "movement_type": "RETIRO",
+                "description": "FACTURACION 07520790",
+                "tienda": "",
+                "tipo_banco": "",
+            },
+            {
+                "account_id": "0884166614",
+                "cod_transac": "601",
+                "abs_amount": 16.0,
+                "movement_date": pd.Timestamp("2026-04-07"),
+                "movement_type": "RETIRO",
+                "description": "I.V.A. COMISION 07520790",
+                "tienda": "",
+                "tipo_banco": "",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "abs_amount": 116.0,
+                "movement_date": pd.Timestamp("2026-04-07"),
+                "movement_type": "RETIRO",
+                "description": "PENALIZACION FACTURACION",
+                "tienda": "",
+                "tipo_jde": "",
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 1})
+
     def test_reverse_grouped_allows_empty_bank_tipo_for_jde_01(self):
         engine = ReconciliationEngine()
 

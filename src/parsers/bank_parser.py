@@ -98,6 +98,7 @@ class _BBVAParser(_BaseBankParser):
     _COL_FECHA     = "FECHA DE OPERACIÓN"
     _COL_DESC      = "DESCRIPCIÓN"
     _COL_DESC_DET  = "DESCRIPCIÓN DETALLADA"
+    _COL_COD_TRANS = "COD. TRANSAC"
     _COL_DEPOSITOS = "DEPÓSITOS"
     _COL_RETIROS   = "RETIROS"
 
@@ -134,6 +135,7 @@ class _BBVAParser(_BaseBankParser):
             (self._COL_FECHA,     "raw_date"),
             (self._COL_DESC,      "description"),
             (self._COL_DESC_DET,  "description_detail"),
+            (self._COL_COD_TRANS, "raw_cod_transac"),
             (self._COL_DEPOSITOS, "raw_deposit"),
             (self._COL_RETIROS,   "raw_withdrawal"),
         ]:
@@ -167,7 +169,7 @@ class _BBVAParser(_BaseBankParser):
 
         keep = ["account_id", "bank", "raw_date",
                 "description", "description_detail",
-                "raw_deposit", "raw_withdrawal"]
+            "raw_deposit", "raw_withdrawal", "raw_cod_transac"]
         return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
 
     def _extract_account(self, df: pd.DataFrame) -> str:
@@ -470,8 +472,8 @@ class _MercadoPagoParser(_BaseBankParser):
         Fila 4+ → datos
     
     NUEVA LÓGICA: Lee colores de la celda en columna "Total a recibir" (col8).
-    Solo procesa filas con color (descarta blanco y gris claro).
-    Agrupa por color y suma montos para matching.
+    Conserva cualquier color (incluyendo blanco/gris) y genera una clave
+    estable para agrupar correctamente por color.
     
     Columnas usadas (buscadas por nombre en la fila de cabecera):
         'Número de operación'  → folio
@@ -514,39 +516,43 @@ class _MercadoPagoParser(_BaseBankParser):
                 continue
         return fallback
 
-    def _is_color_ignored(self, fill: PatternFill) -> bool:
+    def _extract_color_key(self, fill: PatternFill) -> str:
         """
-        Devuelve True si el color debe ignorarse (blanco, gris, o sin color).
-        Gris = R=G=B (incluyendo negro #000000 y blanco #FFFFFF).
+        Devuelve una clave de color estable sin ignorar blanco/gris.
+        Prioriza RGB y, si no existe, usa type/indexed/theme/auto.
         """
         if not fill or not fill.fgColor:
-            return True
-        color = fill.fgColor.rgb
-        if not color:
-            return True
-        
-        color_str = str(color).upper()
-        
-        # Colores completamente ignorados (blanco y variantes)
-        ignored = {"FFFFFFFF", "00000000"}
-        if color_str in ignored:
-            return True
-        
-        # Detectar grises: R=G=B en formato AARRGGBB (ARGB)
-        # Formato: "FFNNNNNN" → AA=FF, RR=NN, GG=NN, BB=NN
-        if len(color_str) >= 8:
-            try:
-                # Extraer RGB (ignorar alpha)
-                r = color_str[2:4]
-                g = color_str[4:6]
-                b = color_str[6:8]
-                # Si R=G=B es gris (incluyendo blanco y negro)
-                if r == g == b:
-                    return True  # Gris detectado, ignorar
-            except (IndexError, ValueError):
-                pass
-        
-        return False
+            return "NO_FILL"
+
+        fg = fill.fgColor
+        try:
+            color_type = str(getattr(fg, "type", "") or "").strip().lower()
+        except (AttributeError, TypeError, ValueError):
+            color_type = ""
+
+        rgb = getattr(fg, "rgb", None)
+        if rgb:
+            return f"RGB:{str(rgb).strip().upper()}"
+
+        indexed = getattr(fg, "indexed", None)
+        if indexed is not None:
+            return f"INDEXED:{indexed}"
+
+        theme = getattr(fg, "theme", None)
+        tint = getattr(fg, "tint", None)
+        if theme is not None:
+            tint_key = "" if tint is None else f":TINT:{tint}"
+            return f"THEME:{theme}{tint_key}"
+
+        auto = getattr(fg, "auto", None)
+        if auto is not None:
+            return f"AUTO:{auto}"
+
+        value = getattr(fg, "value", None)
+        if value:
+            return f"{color_type.upper() or 'COLOR'}:{str(value).strip().upper()}"
+
+        return "UNKNOWN_COLOR"
 
     def _normalize_amount(self, amount_str: str) -> str:
         """Normaliza monto: remueve $, convierte coma a punto, etc."""
@@ -558,18 +564,14 @@ class _MercadoPagoParser(_BaseBankParser):
         normalized = normalized.replace(" ", "")
         return normalized
 
-    def _get_cell_color_hex(self, cell) -> str | None:
-        """Extrae el color RGB de una celda y lo devuelve como string hex, o None si debe ignorarse."""
+    def _get_cell_color_hex(self, cell) -> str:
+        """Extrae una clave de color para agrupar filas de Mercado Pago."""
         try:
             fill = cell.fill
-            if self._is_color_ignored(fill):
-                return None
-            color = fill.fgColor.rgb
-            if color:
-                return str(color).upper()
+            return self._extract_color_key(fill)
         except (AttributeError, TypeError):
             pass
-        return None
+        return "UNKNOWN_COLOR"
 
     def parse(self, file_path: str) -> pd.DataFrame:
         """Parsea Mercado Pago desde Excel, extrayendo colores de las celdas."""
@@ -617,7 +619,7 @@ class _MercadoPagoParser(_BaseBankParser):
                 )
                 # La selección final de filas válidas por color se hace en main.py
                 # (grupos cuyo total aparece en Scotiabank). Aquí no descartamos por color.
-                cell_color = cell_color or ""
+                cell_color = cell_color or "UNKNOWN_COLOR"
                 
                 # Obtener datos de la fila desde pandas
                 # Conversión: Excel usa 1-indexed, pandas usa 0-indexed
@@ -795,6 +797,10 @@ class _ReporteParser(_BaseBankParser):
             if len(df.columns) > 11 else ""
         )
 
+        # COD. TRANSAC: col 5
+        col_cod = header[5] if len(header) > 5 else "COD. TRANSAC"
+        df["raw_cod_transac"] = df.get(col_cod, df.iloc[:, 5]).astype(str)
+
         # Clasificación tienda+tipo (col 13 = TPV)
         col_tpv = header[13] if len(header) > 13 else "TPV"
         clasificacion = df.get(col_tpv, df.iloc[:, 13]).astype(str)
@@ -811,7 +817,7 @@ class _ReporteParser(_BaseBankParser):
             "account_id", "bank", "raw_date",
             "description", "description_detail",
             "raw_deposit", "raw_withdrawal",
-            "tienda", "tipo_banco",
+            "tienda", "tipo_banco", "raw_cod_transac",
         ]
         return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
 

@@ -1,4 +1,6 @@
-# 📊 Guía Completa de Arquitectura - Aplicación de Conciliación Bancaria
+# Guía Completa de Arquitectura - Aplicación de Conciliación Bancaria
+
+Estado del documento: actualizado a cambios de abril 2026.
 
 ## 🎯 Objetivo General
 
@@ -65,9 +67,11 @@ La app compara **movimientos bancarios** (estado de cuenta) contra **registros J
 │ ────────────────────────                                    │
 │ Para cada movimiento bancario:                              │
 │   1. Buscar en JDE con monto EXACTO + fecha (±2 días)      │
-│   2. FILTRAR por tienda si ambos tienen tienda            │
+│   2. FILTRAR por tienda/tipo con reglas estrictas          │
 │   3. FILTRAR por tipo de movimiento (comisión/no-comisión) │
-│   4. Si encuentra 1 match → EXACTO (pair: 1←→1)           │
+│   4. Filtrar por compatibilidad de cuenta (incluye sufijo) │
+│   5. Resolver unicidad priorizando bancos con menos        │
+│      candidatos exactos (evita pendientes falsos)          │
 │ Resultado: lista de exact_matches                          │
 │                                                              │
 │ PASO 2: MATCHING AGRUPADO (Propuestas)                     │
@@ -77,12 +81,16 @@ La app compara **movimientos bancarios** (estado de cuenta) contra **registros J
 │      el monto bancario (subset sum problem)                 │
 │   2. Permite hasta 10 movimientos por grupo                │
 │   3. Filtra por tienda (si existe)                         │
-│   4. Resultado: grouped_match (1 banco ← N JDE)           │
+│   4. Regla de negocio: CARGO POR DISPERSION solo agrupa    │
+│      contra JDE NOMINA (sin completar con comisiones)      │
+│   5. Resultado: grouped_match (1 banco ← N JDE)            │
 │                                                              │
 │ PASO 3: MATCHING INVERSO (Reverso)                         │
 │ ────────────────────────                                    │
 │ Si JDE sin match SIN encontrar agrupación:                │
 │   1. Buscar 1 movimiento JDE que sea suma de N bancos      │
+│   2. Regla simétrica: JDE NOMINA solo con bancos           │
+│      CARGO POR DISPERSION                                  │
 │   2. Resultado: reverse_grouped_match (N banco → 1 JDE)   │
 └──────────────────────────────────────────────────────────────┘
             ↓
@@ -186,6 +194,10 @@ Columnas estándar:
 - `bank_normalizer.py` - Normaliza movimientos bancarios
 - `jde_normalizer.py` - Normaliza movimientos JDE
 
+Cambios recientes:
+- Si un monto llega en columna de retiro con signo positivo, se normaliza como retiro (negativo).
+- Si un monto llega en columna de depósito con signo negativo, se respeta como retiro.
+
 ---
 
 ### **3. VALIDADORES** (`src/validacion/`)
@@ -234,7 +246,9 @@ def _find_exact_match(bank_row, jde_candidates):
 2. Busca JDE's con monto exacto (±0.50 centavos)
 3. Filtra por fecha (±2 días)
 4. Filtra por tienda si ambos tienen
-5. Si encuentra 1 → es un `exact_match`
+5. Filtra por cuenta compatible (incluye equivalencia por sufijo y cuentas como texto numérico con `.0`)
+6. Resuelve conflictos de unicidad priorizando movimientos banco con menos candidatos
+7. Si encuentra 1 disponible → es un exact_match
 
 #### **b) Matching Agrupado (Subset Sum)**
 
