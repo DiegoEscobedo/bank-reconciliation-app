@@ -20,6 +20,7 @@ from config.settings import (
 )
 from main import run_pipeline, run_pipeline_stage1, run_pipeline_stage2
 from src.reporting.excel_reporter import ExcelReporter
+from src.batch.batch_marking import extract_batch_preview, parse_batch_input
 from src.utils.logger import get_logger
 from src.parsers.conciliacion_parser import parse_conciliacion_excel, get_pending_summary
 from src.matching.historical_matcher import match_historical_pendientes, summarize_historical_matches
@@ -187,6 +188,7 @@ def _data_quality_metrics(df: pd.DataFrame, side: str) -> dict:
         "duplicados_clave": int(duplicados),
     }
 
+
 # ════════════════════════════════════════════════════════════
 # CONFIGURACIÓN DE PÁGINA
 # ════════════════════════════════════════════════════════════
@@ -218,6 +220,255 @@ st.markdown("""
 
 </style>
 """, unsafe_allow_html=True)
+
+st.sidebar.markdown("### Modo")
+app_mode = st.sidebar.radio(
+    "Selecciona operación",
+    ["Conciliación", "Marcar por batch"],
+    label_visibility="collapsed",
+)
+
+if app_mode == "Marcar por batch":
+    st.title("Marcado por Batch — Papel de Trabajo")
+    st.caption(
+        "Módulo independiente de conciliación principal: puedes confirmar varios grupos de batch y generar un solo descargable final cuando tú decidas."
+    )
+
+    if "batch_mark_preview" not in st.session_state:
+        st.session_state["batch_mark_preview"] = None
+    if "batch_mark_output" not in st.session_state:
+        st.session_state["batch_mark_output"] = None
+    if "batch_mark_groups" not in st.session_state:
+        st.session_state["batch_mark_groups"] = []
+    if "batch_mark_source_name" not in st.session_state:
+        st.session_state["batch_mark_source_name"] = None
+    if "batch_mark_source_bytes" not in st.session_state:
+        st.session_state["batch_mark_source_bytes"] = None
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        pt_batch_file = st.file_uploader(
+            "Papel de Trabajo (.xlsx)",
+            type=["xlsx", "xls"],
+            key="pt_batch_file",
+        )
+    with c2:
+        batch_date = st.date_input(
+            "Fecha de conciliación",
+            value=datetime.now().date(),
+            key="pt_batch_date",
+        )
+
+    batch_text = st.text_area(
+        "Lista de batch",
+        placeholder="Ejemplo: 70241, 70242, 70243 (también acepta saltos de línea)",
+        height=140,
+        key="pt_batch_text",
+    )
+    only_pending_batch = st.checkbox(
+        "Marcar solo filas pendientes (CONCILIADO vacío/0)",
+        value=True,
+        key="pt_batch_only_pending",
+    )
+
+    if pt_batch_file is not None:
+        current_source_name = f"{pt_batch_file.name}|{getattr(pt_batch_file, 'size', '')}"
+        previous_source_name = st.session_state.get("batch_mark_source_name")
+        if previous_source_name and previous_source_name != current_source_name:
+            st.session_state["batch_mark_preview"] = None
+            st.session_state["batch_mark_output"] = None
+            st.session_state["batch_mark_groups"] = []
+            st.session_state["batch_mark_source_bytes"] = None
+            st.info("Se detectó un archivo distinto. Se reinició la lista de grupos confirmados para evitar mezclar fuentes.")
+        st.session_state["batch_mark_source_name"] = current_source_name
+
+    reset_btn = st.button("🗑 Reiniciar grupos confirmados", key="pt_batch_reset_groups")
+    if reset_btn:
+        st.session_state["batch_mark_preview"] = None
+        st.session_state["batch_mark_output"] = None
+        st.session_state["batch_mark_groups"] = []
+        st.session_state["batch_mark_source_bytes"] = None
+        st.rerun()
+
+    run_batch_btn = st.button(
+        "🔍 Previsualizar conciliación por batch",
+        type="primary",
+        disabled=(pt_batch_file is None or not str(batch_text or "").strip()),
+        key="pt_batch_run",
+    )
+
+    if run_batch_btn:
+        try:
+            batch_tokens = parse_batch_input(batch_text)
+            if not batch_tokens:
+                raise ValueError("No se detectaron números batch válidos")
+
+            source_bytes = pt_batch_file.getvalue()
+            preview = extract_batch_preview(
+                source_bytes,
+                batch_tokens=batch_tokens,
+                only_pending=only_pending_batch,
+            )
+            st.session_state["batch_mark_output"] = None
+            st.session_state["batch_mark_preview"] = {
+                "source_bytes": source_bytes,
+                "batch_tokens": sorted(batch_tokens),
+                "preview": preview,
+                "date": batch_date,
+            }
+            st.session_state["batch_mark_source_bytes"] = source_bytes
+        except Exception as exc:
+            st.session_state["batch_mark_preview"] = None
+            st.session_state["batch_mark_output"] = None
+            st.error(f"Error al previsualizar por batch: {exc}")
+
+    batch_preview = st.session_state.get("batch_mark_preview")
+    if batch_preview:
+        preview = batch_preview["preview"]
+        stats = preview["stats"]
+        selected_df = preview["selected_rows"]
+        aux_facts = preview["aux_facts"]
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Batch capturados", len(batch_preview["batch_tokens"]))
+        m2.metric("Filas con batch", stats.get("rows_batch", 0))
+        m3.metric("Filas a marcar", stats.get("rows_pending", 0))
+        m4.metric("Aux_Fact marcados", len(aux_facts))
+        m5.metric("Total importes", f"${preview.get('total_amount', 0.0):,.2f}")
+
+        st.caption(
+            f"Hoja: {stats.get('sheet', '')} | Columna batch: {stats.get('batch_column', '')} | Columna importe: {stats.get('amount_column', '')}"
+        )
+
+        if selected_df.empty:
+            st.warning(
+                "No se encontraron filas para marcar con los batch indicados. "
+                "Revisa formato de batch o desactiva el filtro de pendientes."
+            )
+        else:
+            with st.expander("Ver detalle de movimientos a conciliar", expanded=False):
+                st.dataframe(
+                    selected_df.style.format({"importe_num": "{:,.2f}"}),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+        confirm_btn = st.button(
+            "✅ Confirmar conciliación por batch",
+            type="secondary",
+            disabled=(len(aux_facts) == 0),
+            key="pt_batch_confirm",
+        )
+
+        if confirm_btn:
+            groups = st.session_state.get("batch_mark_groups", [])
+            batch_signature = tuple(sorted(batch_preview["batch_tokens"]))
+            already_exists = any(tuple(sorted(g.get("batch_tokens", []))) == batch_signature for g in groups)
+            if already_exists:
+                st.warning("Este grupo de batch ya fue confirmado anteriormente.")
+            else:
+                existing_aux = set()
+                for g in groups:
+                    existing_aux.update(g.get("aux_facts", []))
+                new_unique_aux = len(set(aux_facts) - existing_aux)
+
+                group_id = max([g.get("group_id", 0) for g in groups], default=0) + 1
+                groups.append({
+                    "group_id": group_id,
+                    "batch_tokens": list(batch_preview["batch_tokens"]),
+                    "aux_facts": list(aux_facts),
+                    "aux_count": len(aux_facts),
+                    "new_unique_aux": new_unique_aux,
+                    "rows_pending": int(stats.get("rows_pending", 0)),
+                    "total_amount": float(preview.get("total_amount", 0.0) or 0.0),
+                })
+                st.session_state["batch_mark_groups"] = groups
+                st.session_state["batch_mark_output"] = None
+                st.success(f"Grupo confirmado. Aux_Fact nuevos aportados: {new_unique_aux}")
+                st.rerun()
+
+    groups = st.session_state.get("batch_mark_groups", [])
+    if groups:
+        st.markdown("---")
+        st.subheader("Grupos confirmados")
+
+        all_aux = set()
+        for g in groups:
+            all_aux.update(g.get("aux_facts", []))
+
+        total_rows = sum(int(g.get("rows_pending", 0)) for g in groups)
+        total_amount = sum(float(g.get("total_amount", 0.0) or 0.0) for g in groups)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Grupos confirmados", len(groups))
+        c2.metric("Filas acumuladas", total_rows)
+        c3.metric("Aux_Fact únicos", len(all_aux))
+        c4.metric("Total importes acumulado", f"${total_amount:,.2f}")
+
+        remove_idx = None
+        for i, g in enumerate(groups):
+            left, right = st.columns([8, 1])
+            batches = ", ".join(g.get("batch_tokens", []))
+            with left:
+                st.caption(
+                    f"Grupo {g.get('group_id')} | batch: {batches} | filas: {g.get('rows_pending', 0)} | "
+                    f"aux: {g.get('aux_count', 0)} (nuevos: {g.get('new_unique_aux', 0)}) | "
+                    f"total: ${float(g.get('total_amount', 0.0) or 0.0):,.2f}"
+                )
+            with right:
+                if st.button("Quitar", key=f"pt_batch_remove_{g.get('group_id')}"):
+                    remove_idx = i
+
+        if remove_idx is not None:
+            groups.pop(remove_idx)
+            st.session_state["batch_mark_groups"] = groups
+            st.session_state["batch_mark_output"] = None
+            st.rerun()
+
+        generate_btn = st.button(
+            "⬇ Generar descargable final",
+            type="primary",
+            key="pt_batch_generate_final",
+            disabled=(len(groups) == 0 or st.session_state.get("batch_mark_source_bytes") is None),
+        )
+        if generate_btn:
+            try:
+                reporter = ExcelReporter()
+                updated_bytes = reporter.write_back_conciliados(
+                    source=st.session_state["batch_mark_source_bytes"],
+                    reconciled_aux_facts=sorted(all_aux),
+                    match_date=batch_date,
+                )
+                st.session_state["batch_mark_output"] = {
+                    "bytes": updated_bytes,
+                    "group_count": len(groups),
+                    "rows_total": total_rows,
+                    "aux_count": len(all_aux),
+                    "date": batch_date,
+                    "total_amount": total_amount,
+                }
+            except Exception as exc:
+                st.session_state["batch_mark_output"] = None
+                st.error(f"Error al generar descargable final: {exc}")
+
+    batch_output = st.session_state.get("batch_mark_output")
+    if batch_output:
+        st.success("Descargable final generado con los grupos confirmados.")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Grupos incluidos", batch_output.get("group_count", 0))
+        m2.metric("Filas acumuladas", batch_output.get("rows_total", 0))
+        m4.metric("Aux_Fact marcados", batch_output["aux_count"])
+        m3.metric("Total importes", f"${batch_output.get('total_amount', 0.0):,.2f}")
+        fecha_archivo = batch_output["date"].strftime("%d-%m-%Y")
+        st.download_button(
+            label="⬇ Descargar Papel de Trabajo actualizado",
+            data=batch_output["bytes"],
+            file_name=f"PAPEL DE TRABAJO BATCH {fecha_archivo}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="pt_batch_download",
+        )
+
+    st.stop()
 
 # ════════════════════════════════════════════════════════════
 # SIDEBAR — CARGA DE ARCHIVOS
