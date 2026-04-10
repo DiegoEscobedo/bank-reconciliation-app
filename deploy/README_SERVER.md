@@ -1,20 +1,29 @@
-# Deploy en Servidor Propio (Ubuntu + Nginx + systemd)
+﻿# README SERVER
 
-Este setup no rompe tu flujo local
+Se documenta el procedimiento de despliegue en Ubuntu con systemd y Nginx.
 
-streamlit run app.py
+## 1. Objetivo
 
-## 1) Preparar servidor
+Publicar la aplicacion como servicio estable con acceso por dominio y HTTPS.
 
+## 2. Instalacion base
+
+```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip nginx certbot python3-certbot-nginx git
+```
 
+## 3. Usuario de servicio y directorio
+
+```bash
 sudo useradd -m -s /bin/bash appuser || true
 sudo mkdir -p /opt/bank-reconciliation-app
 sudo chown -R appuser:appuser /opt/bank-reconciliation-app
+```
 
-## 2) Clonar app y entorno virtual
+## 4. Clonado e instalacion de aplicacion
 
+```bash
 sudo -u appuser bash -lc '
 cd /opt
 if [ ! -d bank-reconciliation-app/.git ]; then
@@ -24,42 +33,51 @@ cd bank-reconciliation-app
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 '
+```
 
-## 3) Logs
+## 5. Servicio systemd
 
-sudo mkdir -p /var/log/bank-reconciliation
-sudo chown -R appuser:appuser /var/log/bank-reconciliation
-
-## 4) Activar servicio systemd
-
+```bash
 sudo cp deploy/systemd/bank-reconciliation.service /etc/systemd/system/
-
-# Ajusta User, Group, WorkingDirectory y PATH si cambiaste rutas
 sudo systemctl daemon-reload
 sudo systemctl enable bank-reconciliation
 sudo systemctl start bank-reconciliation
 sudo systemctl status bank-reconciliation --no-pager
+```
 
-## 5) Configurar Nginx
+## 6. Publicacion con Nginx
 
+```bash
 sudo cp deploy/nginx/bank-reconciliation.conf /etc/nginx/sites-available/bank-reconciliation
 sudo ln -sf /etc/nginx/sites-available/bank-reconciliation /etc/nginx/sites-enabled/bank-reconciliation
-
-# Cambia server_name en el archivo por tu dominio real
 sudo nginx -t
 sudo systemctl reload nginx
+```
 
-## 6) SSL con Let's Encrypt
+Debe configurarse server_name con el dominio correspondiente.
 
+## 7. Certificado SSL
+
+```bash
 sudo certbot --nginx -d conciliacion.tu-dominio.com
+```
 
-## 7) Deploy futuro
+## 8. Actualizacion operativa
 
+```bash
 chmod +x deploy/scripts/deploy.sh
 ./deploy/scripts/deploy.sh
+```
 
-## Notas de operación
+## 9. Comandos de soporte
 
-- Streamlit queda interno en 127.0.0.1:8501.
-- El acceso público entra por Nginx (80/443).
-- Tu entorno local no se afecta, porque esto corre en otro servidor.
+```bash
+sudo systemctl restart bank-reconciliation
+sudo systemctl status bank-reconciliation
+journalctl -u bank-reconciliation -f
+sudo tail -f /var/log/nginx/error.log
+```
+
+## 10. Alcance
+
+Este esquema de despliegue no modifica el flujo local de desarrollo.

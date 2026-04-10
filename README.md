@@ -1,128 +1,89 @@
-# 🏦 Bank Reconciliation App
+﻿# Bank Reconciliation App
 
-Aplicación de conciliación bancaria que compara movimientos del **estado de cuenta bancario** contra registros del sistema contable **JDE (JD Edwards)**. Genera reportes Excel con los resultados clasificados por tipo de coincidencia.
+Aplicacion empresarial para conciliacion bancaria entre estados de cuenta y registros JDE.
 
----
+## Descripcion general
 
-## Características
+Se soporta la conciliacion de movimientos mediante estrategias exactas y agrupadas, con validacion operativa en interfaz web y generacion de evidencia en Excel.
 
-- Carga archivos Excel del banco y de JDE
-- Normaliza y valida los datos automáticamente
-- Motor de conciliación con múltiples estrategias de matching:
-  - Coincidencia exacta por monto y fecha
-  - Coincidencia agrupada (varios movimientos → un registro)
-- Interfaz web interactiva con **Streamlit**
-- Uso por línea de comandos (CLI)
-- Reporte Excel con hojas separadas por resultado
+## Funcionalidades principales
 
----
+- Conciliacion exacta (1 a 1).
+- Conciliacion agrupada (1 banco a N JDE).
+- Conciliacion agrupada inversa (N banco a 1 JDE).
+- Validacion de agrupaciones en interfaz Streamlit.
+- Generacion de reporte final de conciliacion.
+- Write-back a Papel de Trabajo para cuentas habilitadas.
+- Modulo independiente de marcado por batch.
+- Analisis historico de pendientes.
 
-## Estructura del proyecto
+## Ejecucion
 
-```
-bank-reconciliation-app/
-├── app.py                  # Interfaz Streamlit
-├── main.py                 # Orquestador CLI del pipeline
-├── requirements.txt
-├── config/
-│   └── settings.py         # Configuración global
-├── src/
-│   ├── parsers/            # Lectura de archivos Excel
-│   ├── normalizers/        # Estandarización de columnas
-│   ├── validacion/         # Validación de esquemas
-│   ├── matching/           # Motor de conciliación
-│   ├── reporting/          # Generación de reportes Excel
-│   └── utils/              # Logger, utilidades de fechas/montos
-└── data/
-    ├── raw/
-    │   ├── bank/           # Archivos de entrada del banco
-    │   └── jde/            # Archivos de entrada de JDE
-    └── output/
-        └── reconciliations/ # Reportes generados
-```
-
----
-
-## Instalación
+### Interfaz web
 
 ```bash
-# Clonar el repositorio
+streamlit run app.py
+```
+
+Acceso local: http://localhost:8501
+
+### Linea de comandos
+
+```bash
+python main.py --bank data/raw/bank/archivo_banco.xlsx --jde data/raw/jde/archivo_jde.xlsx --output data/output/reconciliations
+```
+
+## Instalacion local
+
+```bash
 git clone https://github.com/DiegoEscobedo/bank-reconciliation-app.git
 cd bank-reconciliation-app
-
-# Crear entorno virtual (recomendado)
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-
-# Instalar dependencias
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
----
+## Estructura principal
 
-## Uso
-
-### Interfaz web (Streamlit)
-
-```bash
-streamlit run app.py
+```text
+bank-reconciliation-app/
+├── app.py
+├── main.py
+├── README.md
+├── ARCHITECTURE.md
+├── requirements.txt
+├── config/
+│   └── settings.py
+├── docs/
+│   ├── SRS.md
+│   ├── SDS.md
+│   └── MANUAL_USUARIO.md
+├── deploy/
+│   └── README_SERVER.md
+└── src/
+    ├── parsers/
+    ├── normalizers/
+    ├── validacion/
+    ├── matching/
+    ├── reporting/
+    └── batch/
 ```
 
-Abre `http://localhost:8501` en el navegador, carga los archivos del banco y JDE, y descarga el reporte al finalizar.
+## Reglas operativas relevantes
 
-### Línea de comandos
+- Se aplican tolerancias de monto y fecha definidas en config/settings.py.
+- Se aplican controles por cuenta, tienda y tipo para reducir falsos positivos.
+- Para NetPay y Mercado Pago, se asigna tipo TPV cuando el origen no lo informa.
+- En cuentas de Papel de Trabajo, el marcado se ejecuta por Aux_Fact y cuenta.
 
-```bash
-python main.py --bank  data/raw/bank/estado_cuenta.xlsx \
-               --jde   data/raw/jde/movimientos_jde.xlsx \
-               --output data/output/reconciliations/
-```
+## Documentacion
 
-### Despliegue en servidor propio
-
-Se agregó una guía y plantillas en la carpeta `deploy` para montar la app en Linux con `systemd + Nginx + SSL`:
-
-- `deploy/README_SERVER.md`
-- `deploy/systemd/bank-reconciliation.service`
-- `deploy/nginx/bank-reconciliation.conf`
-- `deploy/scripts/deploy.sh`
-
-Esto **no cambia** tu flujo local. Puedes seguir ejecutando en tu equipo con:
-
-```bash
-streamlit run app.py
-```
-
----
-
-## Formato de archivos de entrada
-
-Los archivos deben ser `.xlsx`. Después de parsear y normalizar, el sistema espera las columnas:
-
-| Columna | Tipo | Descripción |
-|---|---|---|
-| `account_id` | string | Identificador de cuenta |
-| `movement_date` | datetime | Fecha del movimiento |
-| `description` | string | Descripción o concepto |
-| `amount_signed` | float | Monto con signo (+/-) |
-| `abs_amount` | float | Monto absoluto |
-| `movement_type` | string | Tipo de movimiento |
-| `source` | string | Origen (`BANK` o `JDE`) |
-
----
-
-## Dependencias principales
-
-| Paquete | Uso |
-|---|---|
-| `pandas` | Procesamiento de datos |
-| `streamlit` | Interfaz web |
-| `openpyxl` / `xlsxwriter` | Lectura y escritura de Excel |
-| `rapidfuzz` | Matching aproximado de texto |
-| `python-dateutil` | Parseo de fechas |
-
----
+- Requisitos: docs/SRS.md
+- Diseno tecnico: docs/SDS.md
+- Manual de operacion: docs/MANUAL_USUARIO.md
+- Arquitectura: ARCHITECTURE.md
+- Despliegue en servidor: deploy/README_SERVER.md
 
 ## Autor
 
-**Diego Escobedo** — diegoemilianoescobedoramirez@gmail.com
+Diego Escobedo
