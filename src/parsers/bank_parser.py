@@ -450,6 +450,8 @@ class _NetPayParser(_BaseBankParser):
             .map(_TIENDA_ABBREV)
             .fillna("")
         )
+        # NetPay no trae tipo de pago en su Excel origen; por negocio se trata como TPV.
+        result["tipo_banco"] = "TPV"
         # Diagnóstico: mostrar primeras filas extraídas
         for _ri in range(min(3, len(result))):
             logger.info(
@@ -721,6 +723,8 @@ class _MercadoPagoParser(_BaseBankParser):
                 .map(_TIENDA_ABBREV)
                 .fillna("")
             )
+            # Mercado Pago no trae tipo de pago explícito; por negocio se trata como TPV.
+            result["tipo_banco"] = "TPV"
             
             logger.info("[MERCADOPAGO] Movimientos procesados: %d", len(result))
             logger.info("[MERCADOPAGO] Tiendas detectadas: %s", result["tienda"].value_counts().to_dict())

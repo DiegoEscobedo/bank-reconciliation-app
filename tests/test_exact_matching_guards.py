@@ -385,5 +385,116 @@ class TestExactMatchingGuards(unittest.TestCase):
         result = engine.reconcile(bank_df, jde_df)
         self.assertEqual(result["summary"]["exact_matches_count"], 2)
 
+    def test_netpay_does_not_match_jde_efectivo_tipo_01(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "NETPAY VENTA TARJETA",
+                "amount_signed": 1000.0,
+                "abs_amount": 1000.0,
+                "movement_type": "DEPOSITO",
+                "source": "BANK",
+                "bank": "NETPAY",
+                "tienda": "FAB",
+                "tipo_banco": "04",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "COBRO EFECTIVO",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": 1000.0,
+                "abs_amount": 1000.0,
+                "movement_type": "DEPOSITO",
+                "source": "JDE",
+                "tienda": "OUZ",
+                "tipo_jde": "01",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 0)
+
+    def test_netpay_exact_respects_tienda(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "NETPAY VENTA TARJETA",
+                "amount_signed": 1000.0,
+                "abs_amount": 1000.0,
+                "movement_type": "DEPOSITO",
+                "source": "BANK",
+                "bank": "NETPAY",
+                "tienda": "FAB",
+                "tipo_banco": "TPV",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "COBRO TARJETA OTRA TIENDA",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": 1000.0,
+                "abs_amount": 1000.0,
+                "movement_type": "DEPOSITO",
+                "source": "JDE",
+                "tienda": "OUZ",
+                "tipo_jde": "04",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 0)
+
+    def test_mercadopago_tpv_does_not_match_jde_efectivo_tipo_01(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "MERCADO PAGO | OUTLET ZACATECAS",
+                "amount_signed": 1500.0,
+                "abs_amount": 1500.0,
+                "movement_type": "DEPOSITO",
+                "source": "BANK",
+                "bank": "MERCADOPAGO",
+                "tienda": "OUZ",
+                "tipo_banco": "TPV",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "movement_date": pd.Timestamp("2026-04-10"),
+                "description": "COBRO EFECTIVO",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": 1500.0,
+                "abs_amount": 1500.0,
+                "movement_type": "DEPOSITO",
+                "source": "JDE",
+                "tienda": "OUZ",
+                "tipo_jde": "01",
+            }
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 0)
+
 if __name__ == "__main__":
     unittest.main()

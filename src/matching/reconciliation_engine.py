@@ -320,15 +320,6 @@ class ReconciliationEngine:
         except (KeyError, TypeError):
             pass
 
-        # NETPAY: el matching por tienda no aplica — el filtro de monto+fecha
-        # es suficiente para evitar falsos positivos. La tienda solo es informativa.
-        try:
-            _bank_src = bank_row.get("bank") if hasattr(bank_row, "get") else bank_row["bank"]
-            if str(_bank_src).strip().upper() == "NETPAY":
-                return candidates
-        except (KeyError, TypeError):
-            pass
-
         # Determinar si la columna tienda existe en los candidatos JDE
         jde_tiene_tienda = (
             "tienda" in candidates.columns
