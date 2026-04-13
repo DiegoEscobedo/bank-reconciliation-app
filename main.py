@@ -295,10 +295,16 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
                 mp["_amount_num"] = mp["raw_total_recibir"].fillna("").apply(clean_amount)
             else:
                 mp["_amount_num"] = mp["raw_deposit"].fillna("").apply(clean_amount)
-            mp = mp[mp["_amount_num"] > 0].copy()
+
+            # Si existen filas derivadas de COMISION, no deben alterar la suma por color
+            # usada para elegibilidad de grupos MP vs Scotiabank.
+            if "_mp_row_type" in mp.columns:
+                mp_base = mp[(mp["_mp_row_type"] != "COMISION") & (mp["_amount_num"] > 0)].copy()
+            else:
+                mp_base = mp[mp["_amount_num"] > 0].copy()
 
             color_sums = (
-                mp.groupby("_color_key", dropna=False)["_amount_num"]
+                mp_base.groupby("_color_key", dropna=False)["_amount_num"]
                 .sum()
                 .round(2)
             )
@@ -307,7 +313,7 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
             for color, total in color_sums.items():
                 if not color:
                     continue
-                row_count = int((mp["_color_key"] == color).sum())
+                row_count = int((mp_base["_color_key"] == color).sum())
                 has_match = total in scotia_amounts
                 mp_color_filter_debug["colors"].append({
                     "color": color,
@@ -329,6 +335,45 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
             }
 
             mp_filtered = mp[mp["_color_key"].isin(eligible_colors)].copy()
+
+            # Consolidar comisiones MP en un solo movimiento para buscar
+            # contra un unico registro JDE de comision.
+            if "_mp_row_type" in mp_filtered.columns:
+                mp_cobro = mp_filtered[mp_filtered["_mp_row_type"] != "COMISION"].copy()
+                mp_comm = mp_filtered[mp_filtered["_mp_row_type"] == "COMISION"].copy()
+
+                commission_total = 0.0
+                if not mp_comm.empty:
+                    commission_total = round(
+                        mp_comm["raw_withdrawal"].fillna("").apply(clean_amount).sum(),
+                        2,
+                    )
+
+                if commission_total > 0:
+                    base_row = mp_comm.iloc[0].copy()
+                    base_row["description"] = "MERCADO PAGO | COMISION TOTAL"
+                    base_row["description_detail"] = "COMISIONES MP CONSOLIDADAS"
+                    base_row["raw_deposit"] = ""
+                    base_row["raw_withdrawal"] = f"{commission_total:.2f}"
+                    base_row["raw_cobro"] = ""
+                    base_row["raw_total_recibir"] = ""
+                    base_row["cell_color"] = "MP_COMISION_TOTAL"
+                    base_row["_color_key"] = "MP_COMISION_TOTAL"
+                    base_row["_amount_num"] = commission_total
+                    base_row["_mp_row_type"] = "COMISION"
+
+                    mp_filtered = _pd.concat(
+                        [mp_cobro, _pd.DataFrame([base_row])],
+                        ignore_index=True,
+                    )
+                    logger.info(
+                        "[MP-COLOR-FILTER] Comisiones MP consolidadas en 1 fila: total=%.2f (origen=%d filas)",
+                        commission_total,
+                        len(mp_comm),
+                    )
+                else:
+                    mp_filtered = mp_cobro
+
             total_mp_after += len(mp_filtered)
 
             logger.info(

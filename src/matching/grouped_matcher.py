@@ -1,5 +1,6 @@
 import pandas as pd
 
+from config.settings import COMMISSION_CODE_BIAS_BANKS, COMMISSION_CODES_6614
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -17,7 +18,10 @@ class GroupedMatcher:
 
 	def __init__(self, engine):
 		self.engine = engine
-		self._commission_codes_6614 = {"537", "517", "600", "601"}
+		self._commission_codes_6614 = {str(code) for code in COMMISSION_CODES_6614}
+		self._commission_bias_banks = {
+			self._normalize_text(bank) for bank in COMMISSION_CODE_BIAS_BANKS
+		}
 
 	@staticmethod
 	def _normalize_tienda(value) -> str:
@@ -57,6 +61,9 @@ class GroupedMatcher:
 		digits = "".join(ch for ch in text if ch.isdigit())
 		return digits.endswith("6614")
 
+	def _is_bank_in_commission_bias_scope(self, value) -> bool:
+		return self._normalize_text(value) in self._commission_bias_banks
+
 	@classmethod
 	def _is_jde_commission_row(cls, row) -> bool:
 		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
@@ -68,13 +75,14 @@ class GroupedMatcher:
 		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
 		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
 		code = cls._normalize_code(row.get("cod_transac", "") if hasattr(row, "get") else "")
-		return "COMISION" in desc or mvtype == "COM" or code in {"537", "517", "600", "601"}
+		commission_codes = {cls._normalize_code(code) for code in COMMISSION_CODES_6614}
+		return "COMISION" in desc or mvtype == "COM" or code in commission_codes
 
 	def _get_6614_commission_candidates(self, available_bank: "pd.DataFrame", jde_row) -> "pd.DataFrame":
 		"""
-		Sesgo opcional para 6614:
+		Sesgo opcional para comisiones Banorte:
 		- Solo aplica a filas JDE de comisión.
-		- Toma solo movimientos banco 6614 con COD. TRANSAC en {537,517,600,601}.
+		- Toma solo movimientos del banco configurado con COD. TRANSAC de comision.
 		Si no aplica o no hay columnas requeridas, retorna DataFrame vacío.
 		"""
 		if available_bank.empty:
@@ -83,14 +91,14 @@ class GroupedMatcher:
 		if not self._is_jde_commission_row(jde_row):
 			return available_bank.iloc[0:0].copy()
 
-		if "account_id" not in available_bank.columns or "cod_transac" not in available_bank.columns:
+		if "bank" not in available_bank.columns or "cod_transac" not in available_bank.columns:
 			return available_bank.iloc[0:0].copy()
 
-		is_6614 = available_bank["account_id"].apply(self._is_account_6614)
+		bank_bias_mask = available_bank["bank"].apply(self._is_bank_in_commission_bias_scope)
 		code_mask = available_bank["cod_transac"].apply(
 			lambda v: self._normalize_code(v) in self._commission_codes_6614
 		)
-		return available_bank[is_6614 & code_mask].copy()
+		return available_bank[bank_bias_mask & code_mask].copy()
 
 	@classmethod
 	def _is_cargo_por_dispersion(cls, value) -> bool:
@@ -560,13 +568,13 @@ class GroupedMatcher:
 			if len(available_bank) < 2:
 				continue
 
-			# Sesgo 6614 comisiones: intentar primero subset solo con codigos
-			# de comision (537/517/600/601). Si no cuadra, fallback normal.
+			# Sesgo Banorte comisiones: intentar primero subset solo con codigos
+			# de comision. Si no cuadra, fallback normal.
 			result = None
-			used_bias_6614 = False
+			used_commission_code_bias = False
 			bias_candidates = self._get_6614_commission_candidates(available_bank, jde_row)
 			if len(bias_candidates) >= 2:
-				# En 6614 comisiones, los grupos pueden requerir muchas piezas
+				# En comisiones Banorte, los grupos pueden requerir muchas piezas
 				# (p. ej. multiples 100 + 16 + 5 + 0.8). No recortar por nsmallest.
 				biased_rows = list(bias_candidates.iterrows())
 				# Sin limite artificial de tamano de grupo en este sesgo.
@@ -579,7 +587,7 @@ class GroupedMatcher:
 				)
 				if bias_result is not None and len(bias_result) >= 2:
 					result = bias_result
-					used_bias_6614 = True
+					used_commission_code_bias = True
 
 			if result is None:
 				candidate_rows = list(
@@ -613,9 +621,9 @@ class GroupedMatcher:
 				"bank_count": len(bank_indices),
 			})
 			group_id += 1
-			if used_bias_6614:
+			if used_commission_code_bias:
 				logger.info(
-					"[REV-GROUPED-6614-BIAS] JDE idx=%d conciliado con sesgo COD.TRANSAC 537/517/600/601",
+					"[REV-GROUPED-COMMISSION-CODE-BIAS] JDE idx=%d conciliado con sesgo de COD.TRANSAC",
 					jde_index,
 				)
 			logger.info(

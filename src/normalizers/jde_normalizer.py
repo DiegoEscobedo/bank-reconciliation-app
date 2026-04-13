@@ -110,6 +110,18 @@ class JDENormalizer:
         if missing_tipo_mask.any():
             df.loc[missing_tipo_mask, "tipo_jde"] = parsed_tipo[missing_tipo_mask].values
 
+        # Priorizar tipo detectado en descripcion cuando viene patron PI ... <tipo>
+        # y el tipo proveniente de FORMA DE PAGO cae en 01/03 (casos TPV en PT).
+        # Ejemplo real: FORMA=8 -> 03, pero descripcion termina en 28.
+        current_tipo = df["tipo_jde"].fillna("").astype(str).str.strip().str.upper()
+        parsed_tipo_clean = parsed_tipo.fillna("").astype(str).str.strip().str.upper()
+        prefer_desc_tipo_mask = (
+            parsed_tipo_clean.isin(["04", "28"])
+            & current_tipo.isin(["", "01", "03", "NAN", "NONE"])
+        )
+        if prefer_desc_tipo_mask.any():
+            df.loc[prefer_desc_tipo_mask, "tipo_jde"] = parsed_tipo_clean[prefer_desc_tipo_mask].values
+
         # ── 6. Origen ─────────────────────────────────────────────────
         df["source"] = self.SOURCE
 

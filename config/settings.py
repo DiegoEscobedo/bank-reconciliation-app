@@ -29,6 +29,16 @@ TIPO_BANCO_TO_JDE_COMPAT: dict[str, set[str]] = {
 # Para otras cuentas: se aceptan archivos CSV normales del JDE, sin write-back
 PAPEL_TRABAJO_ACCOUNTS = {"6614", "7133"}
 
+# COD. TRANSAC bancarios considerados comision para sesgo Banorte
+# (aplica a cuentas Banorte, p. ej. 3478 y 6614)
+COMMISSION_CODES_BANORTE = {"537", "517", "600", "601", "726"}
+
+# Bancos a los que se aplica el sesgo por COD. TRANSAC de comisiones
+COMMISSION_CODE_BIAS_BANKS = {"BANORTE"}
+
+# Alias de compatibilidad hacia atras
+COMMISSION_CODES_6614 = COMMISSION_CODES_BANORTE
+
 # ── Mapeo nombre completo de tienda → abreviatura JDE ───────────────────────
 # Usado por bank_parser (_ReporteCajaParser) y jde_parser (PapelTrabajoParser)
 TIENDA_ABBREV: dict[str, str] = {

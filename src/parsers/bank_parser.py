@@ -715,6 +715,7 @@ class _MercadoPagoParser(_BaseBankParser):
                 "raw_total_recibir":  data["raw_total_recibir"],
                 "raw_status":         data["raw_status"],   # Estado (Aprobado, etc)
                 "_excel_row_idx":     data["excel_row_idx"],  # para write-back
+                "_mp_row_type":       "COBRO",
             })
             
             # Mapear tienda
@@ -725,6 +726,36 @@ class _MercadoPagoParser(_BaseBankParser):
             )
             # Mercado Pago no trae tipo de pago explícito; por negocio se trata como TPV.
             result["tipo_banco"] = "TPV"
+
+            # Generar movimientos de COMISION como retiros: COBRO - TOTAL A RECIBIR.
+            # Esto permite que varias comisiones MP se agrupen contra un solo JDE de comision.
+            cobro_num = pd.to_numeric(result["raw_cobro"], errors="coerce").fillna(0.0)
+            total_recibir_num = pd.to_numeric(result["raw_total_recibir"], errors="coerce").fillna(0.0)
+            commission_amount = (cobro_num - total_recibir_num).round(2)
+            commission_mask = commission_amount > 0
+
+            commission_count = int(commission_mask.sum())
+            commission_total = float(commission_amount[commission_mask].sum()) if commission_count else 0.0
+
+            if commission_count > 0:
+                commission_df = result.loc[commission_mask].copy()
+                commission_df["description"] = (
+                    "MERCADO PAGO | COMISION | "
+                    + commission_df["description"].fillna("").astype(str)
+                )
+                commission_df["raw_deposit"] = ""
+                commission_df["raw_withdrawal"] = commission_amount[commission_mask].map(lambda v: f"{v:.2f}").values
+                commission_df["_mp_row_type"] = "COMISION"
+                # Estas filas no deben influir en el filtro por total de color.
+                commission_df["raw_total_recibir"] = ""
+
+                result = pd.concat([result, commission_df], ignore_index=True)
+
+            logger.info(
+                "[MERCADOPAGO] Comisiones generadas: %d filas, total=%.2f",
+                commission_count,
+                commission_total,
+            )
             
             logger.info("[MERCADOPAGO] Movimientos procesados: %d", len(result))
             logger.info("[MERCADOPAGO] Tiendas detectadas: %s", result["tienda"].value_counts().to_dict())
