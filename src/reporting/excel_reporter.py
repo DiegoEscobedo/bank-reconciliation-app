@@ -270,6 +270,9 @@ class ExcelReporter:
         match_date: "date | None" = None,
         debug_info: "dict | None" = None,
         filter_accounts: "list | None" = None,
+        strict_match_entries: "list[dict] | None" = None,
+        amount_tolerance: float = 0.50,
+        require_full_strict_match: bool = False,
     ) -> bytes:
         """
         Marca como conciliadas en el Papel de Trabajo las filas que
@@ -299,6 +302,17 @@ class ExcelReporter:
         filter_accounts : list, opcional
             Cuentas permitidas (ej: ['7133']) — solo marca filas de esas cuentas.
             Si no se proporciona, marca ALL filas.
+        strict_match_entries : list[dict], opcional
+            Criterios por fila para marcado estricto. Cada elemento puede incluir
+            aux_fact, account_id y amount_signed/amount.
+            Si se proporciona, solo se marca cuando coincide
+            Aux_Fact + cuenta + monto (con tolerancia).
+        amount_tolerance : float, opcional
+            Tolerancia absoluta permitida en comparación de monto.
+        require_full_strict_match : bool, opcional
+            Si es True y se usan strict_match_entries, exige que TODOS los
+            criterios estrictos encuentren fila para marcado. Si no se cumple,
+            lanza error y evita write-back parcial.
 
         Retorna
         -------
@@ -311,6 +325,71 @@ class ExcelReporter:
         if match_date is None:
             match_date = date.today()
 
+        def _normalize_account_token(value: object) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if text.endswith(".0"):
+                text = text[:-2]
+            digits = re.sub(r"\D", "", text)
+            return digits or text.upper()
+
+        def _extract_account_from_desc(desc_val: str) -> str:
+            m = re.search(r"CUENTA\s+(\d+)", str(desc_val or ""), re.IGNORECASE)
+            return m.group(1) if m else ""
+
+        def _parse_amount(value: object) -> float | None:
+            txt = str(value or "").strip()
+            if txt == "":
+                return None
+            txt = txt.replace("$", "").replace(" ", "")
+            negative = False
+            if txt.startswith("(") and txt.endswith(")"):
+                negative = True
+                txt = txt[1:-1]
+            if txt.endswith("-"):
+                negative = True
+                txt = txt[:-1]
+            txt = txt.replace(",", "")
+            try:
+                num = float(txt)
+            except ValueError:
+                return None
+            if negative:
+                num = -abs(num)
+            return num
+
+        strict_index: dict[str, list[tuple[str, float]]] = {}
+        strict_expected_keys: set[tuple[str, str, float]] = set()
+        if strict_match_entries:
+            for item in strict_match_entries:
+                if not isinstance(item, dict):
+                    continue
+
+                aux_raw = item.get("aux_fact")
+                acc_raw = item.get("account_id")
+                amt_raw = item.get("amount_signed", item.get("amount"))
+
+                aux_token = str(aux_raw or "").strip()
+                if not aux_token:
+                    continue
+                try:
+                    aux_token = str(int(float(aux_token)))
+                except (ValueError, OverflowError):
+                    pass
+
+                acc_token = _normalize_account_token(acc_raw)
+                if not acc_token:
+                    continue
+
+                amt = _parse_amount(amt_raw)
+                if amt is None:
+                    continue
+
+                amt_abs = abs(float(amt))
+                strict_index.setdefault(aux_token, []).append((acc_token, amt_abs))
+                strict_expected_keys.add((aux_token, acc_token, amt_abs))
+
         # Normalizar source a bytes en memoria
         if isinstance(source, (bytes, bytearray)):
             src_bytes = bytes(source)
@@ -321,72 +400,59 @@ class ExcelReporter:
         src_buf = io.BytesIO(src_bytes)
 
         # ── 1. Parsear el ZIP sin openpyxl ────────────────────────────────────
-        # Leemos los XMLs directamente: evitamos que openpyxl reescriba nada.
         with zipfile.ZipFile(src_buf, "r") as z:
-            # Encontrar ruta interna de la hoja AUX CONTABLE
-            wb_xml  = z.read("xl/workbook.xml")
+            wb_xml = z.read("xl/workbook.xml")
             rel_xml = z.read("xl/_rels/workbook.xml.rels")
-            wb_tree  = ET.fromstring(wb_xml)
+            wb_tree = ET.fromstring(wb_xml)
             rel_tree = ET.fromstring(rel_xml)
             rels = {
                 el.get("Id"): el.get("Target")
                 for el in rel_tree
                 if el.get("Target", "").startswith("worksheets/")
             }
+
             r_ns_key = (
                 "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
             )
-            sheet_name: str | None = None
             sheet_zip_path: str | None = None
             for candidate in ("AUX CONTABLE", "Detalle1"):
                 for el in wb_tree.iter():
                     if el.get("name") == candidate:
                         r_id = el.get(r_ns_key)
                         if r_id and r_id in rels:
-                            sheet_name = candidate
                             sheet_zip_path = "xl/" + rels[r_id]
                             break
                 if sheet_zip_path:
                     break
 
             if sheet_zip_path is None:
-                raise ValueError(
-                    "No se encontró la hoja 'AUX CONTABLE' en el archivo."
-                )
+                raise ValueError("No se encontró la hoja 'AUX CONTABLE' en el archivo.")
 
             if debug_info is not None:
                 debug_info["sheet_zip_path"] = sheet_zip_path
 
             orig_ws_bytes = z.read(sheet_zip_path)
             orig_ss_bytes = z.read("xl/sharedStrings.xml")
-            all_entries: list[tuple] = [
-                (item, z.read(item.filename)) for item in z.infolist()
-            ]
+            all_entries: list[tuple] = [(item, z.read(item.filename)) for item in z.infolist()]
 
         orig_ws_xml = orig_ws_bytes.decode("utf-8")
         orig_ss_xml = orig_ss_bytes.decode("utf-8")
 
-        # ── 2. Construir mapa de sharedStrings index → valor ─────────────────
-        # Cada <si> puede ser texto simple (<si><t>val</t></si>) o rich text
-        # (<si><r><rPr>...</rPr><t>val</t></r></si>).  Concatenamos todos los
-        # <t> de cada bloque para obtener el valor visible.
+        # ── 2. Mapa sharedStrings index → valor ─────────────────────────────
         si_blocks = re.findall(r"<si>.*?</si>", orig_ss_xml, re.DOTALL)
         ss_values: list[str] = [
             "".join(re.findall(r"<t>([^<]*)</t>", blk))
             for blk in si_blocks
         ]
 
-        # ── 3. Detectar fila de encabezado y columnas clave desde el XML ──────
-        # Buscamos la primera fila donde alguna celda t="s" tiene el valor
-        # "Aux_Fact" (cuyo índice en sharedStrings es típicamente 0).
-        target_col_names = {"Aux_Fact", "CONCILIADO", "FECHA CONCILIACION", "Descripción", "Descripcion"}
+        # ── 3. Detectar encabezado y columnas ───────────────────────────────
         header_row_idx: int | None = None
         col_aux_letter: str | None = None
         col_conc_letter: str | None = None
         col_fecha_letter: str | None = None
-        col_desc_letter: str | None = None  # Para filtrar por "CUENTA XXXX"
+        col_desc_letter: str | None = None
+        col_amount_letter: str | None = None
 
-        # Iterar filas del worksheet XML buscando el encabezado
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
             row_txt = row_m.group()
             r_m = re.search(r'\br="(\d+)"', row_txt)
@@ -394,7 +460,6 @@ class ExcelReporter:
                 continue
             rn = int(r_m.group(1))
 
-            # Mapa col_letter → valor string en esta fila
             cell_map: dict[str, str] = {}
             for c_m in re.finditer(
                 r'<c\s+r="([A-Z]+)\d+"[^>]*t="s"[^>]*><v>(\d+)</v></c>',
@@ -416,6 +481,8 @@ class ExcelReporter:
                         col_fecha_letter = col_ltr
                     elif val in ("Descripción", "Descripcion"):
                         col_desc_letter = col_ltr
+                    elif val == "Importe":
+                        col_amount_letter = col_ltr
                 break
 
         if debug_info is not None:
@@ -423,39 +490,43 @@ class ExcelReporter:
             debug_info["col_aux_letter"] = col_aux_letter
             debug_info["col_conc_letter"] = col_conc_letter
             debug_info["col_fecha_letter"] = col_fecha_letter
+            debug_info["col_desc_letter"] = col_desc_letter
+            debug_info["col_amount_letter"] = col_amount_letter
             debug_info["ss_count"] = len(ss_values)
-            # Muestra los primeros 5 valores de sharedStrings para verificar
             debug_info["ss_head"] = ss_values[:5]
+            debug_info["strict_index_keys"] = len(strict_index)
 
         if header_row_idx is None or col_aux_letter is None:
-            raise ValueError(
-                "No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE."
-            )
+            raise ValueError("No se pudo localizar el encabezado Aux_Fact en la hoja AUX CONTABLE.")
 
         # ── 4. Identificar filas a marcar ────────────────────────────────────
-        # Aux_Fact puede ser:
-        #   a) Fórmula con valor cacheado: <c r="A14"><f>...</f><v>2647414</v></c>
-        #   b) Valor numérico directo:     <c r="A14"><v>2647414</v></c>
-        #   c) Shared string t="s":        <c r="A14" t="s"><v>IDX</v></c>
-        # Normalizar: "2647414.0" y "2647414" deben ser equivalentes
         reconciled_set: set[str] = set()
         for v in reconciled_aux_facts:
             sv = str(v).strip()
+            if not sv:
+                continue
             reconciled_set.add(sv)
             try:
                 reconciled_set.add(str(int(float(sv))))
             except (ValueError, OverflowError):
                 pass
-        rows_to_mark: list[int] = []
-        _dbg_aux_vals: list = []  # primeros valores de Aux_Fact vistos en XML
 
-        # DEBUG: Guardar estado inicial
+        filter_accounts_set = {
+            _normalize_account_token(v) for v in (filter_accounts or []) if str(v).strip()
+        }
+
+        rows_to_mark: list[int] = []
+        strict_hit_keys: set[tuple[str, str, float]] = set()
+        strict_seen_aux: set[str] = set()
+        strict_seen_aux_account: set[tuple[str, str]] = set()
+        strict_best_amount_diff: dict[tuple[str, str, float], float] = {}
+        strict_unreadable_amount_accounts: set[tuple[str, str]] = set()
+        _dbg_aux_vals: list = []
+
         if debug_info is not None:
-            debug_info["filter_accounts"] = filter_accounts
-            debug_info["col_aux_letter"] = col_aux_letter
-            debug_info["col_desc_letter"] = col_desc_letter
-            debug_info["header_row_idx"] = header_row_idx
+            debug_info["filter_accounts"] = list(filter_accounts_set)
             debug_info["reconciled_set"] = list(reconciled_set)[:20]
+            debug_info["strict_expected_count"] = len(strict_expected_keys)
 
         for row_m in re.finditer(r"<row\b[^>]*>.*?</row>", orig_ws_xml, re.DOTALL):
             row_txt = row_m.group()
@@ -466,77 +537,167 @@ class ExcelReporter:
             if rn <= header_row_idx:
                 continue
 
-            # Buscar la celda de Aux_Fact en esta fila
             aux_cell_m = re.search(
                 rf'<c\s+r="{col_aux_letter}{rn}"[^>]*>(.*?)</c>',
-                row_txt, re.DOTALL,
+                row_txt,
+                re.DOTALL,
             )
             if not aux_cell_m:
                 continue
-            aux_inner = aux_cell_m.group(1)
 
-            # Extraer valor
+            aux_inner = aux_cell_m.group(1)
             aux_val = ""
-            # Caso 1: tiene <v>
             v_m = re.search(r"<v>([^<]+)</v>", aux_inner)
             if v_m:
                 raw = v_m.group(1).strip()
-                # Si es shared string, resolver
                 t_attr_m = re.search(r't="s"', aux_cell_m.group(0))
                 if t_attr_m:
                     idx = int(raw)
                     aux_val = ss_values[idx] if idx < len(ss_values) else raw
                 else:
-                    # Valor numérico o texto; convertir a str de int si es posible
                     try:
                         aux_val = str(int(float(raw)))
                     except ValueError:
                         aux_val = raw
 
             if len(_dbg_aux_vals) < 10:
-                _dbg_aux_vals.append({"row": rn, "raw_v": v_m.group(1).strip() if v_m else None, "aux_val": aux_val})
+                _dbg_aux_vals.append({
+                    "row": rn,
+                    "raw_v": v_m.group(1).strip() if v_m else None,
+                    "aux_val": aux_val,
+                })
 
-            if aux_val in reconciled_set:
-                # Si hay filter_accounts, verificar que la cuenta de esta fila esté incluida
-                should_mark = True
-                if filter_accounts and col_desc_letter is not None:
-                    # Extraer cuenta de la columna Descripción
-                    desc_cell_m = re.search(
-                        rf'<c\s+r="{col_desc_letter}{rn}"[^>]*>(.*?)</c>',
-                        row_txt, re.DOTALL,
+            if aux_val not in reconciled_set:
+                continue
+
+            row_account = ""
+            if col_desc_letter is not None:
+                desc_cell_m = re.search(
+                    rf'<c\s+r="{col_desc_letter}{rn}"[^>]*>(.*?)</c>',
+                    row_txt,
+                    re.DOTALL,
+                )
+                if desc_cell_m:
+                    desc_inner = desc_cell_m.group(1)
+                    desc_val = ""
+                    v_m_desc = re.search(r"<v>([^<]+)</v>", desc_inner)
+                    if v_m_desc:
+                        raw_desc = v_m_desc.group(1).strip()
+                        t_attr_m_desc = re.search(r't="s"', desc_cell_m.group(0))
+                        if t_attr_m_desc:
+                            idx_desc = int(raw_desc)
+                            desc_val = ss_values[idx_desc] if idx_desc < len(ss_values) else raw_desc
+                        else:
+                            desc_val = raw_desc
+                    row_account = _extract_account_from_desc(desc_val)
+
+            row_account_norm = _normalize_account_token(row_account)
+
+            should_mark = True
+
+            # Filtro por cuenta: si está activo y no se pudo extraer cuenta, NO marcar.
+            if filter_accounts_set:
+                should_mark = bool(row_account_norm and row_account_norm in filter_accounts_set)
+
+            # Diagnóstico y match estricto: Aux_Fact + cuenta + monto (tolerancia)
+            strict_row_match = False
+            if strict_index and aux_val in strict_index:
+                strict_seen_aux.add(aux_val)
+                if row_account_norm:
+                    strict_seen_aux_account.add((aux_val, row_account_norm))
+
+                row_amount_abs: float | None = None
+                if col_amount_letter is not None:
+                    amt_cell_m = re.search(
+                        rf'<c\s+r="{col_amount_letter}{rn}"[^>]*>(.*?)</c>',
+                        row_txt,
+                        re.DOTALL,
                     )
-                    if desc_cell_m:
-                        desc_inner = desc_cell_m.group(1)
-                        # Extraer valor de descripción
-                        desc_val = ""
-                        v_m_desc = re.search(r"<v>([^<]+)</v>", desc_inner)
-                        if v_m_desc:
-                            raw_desc = v_m_desc.group(1).strip()
-                            t_attr_m_desc = re.search(r't="s"', desc_cell_m.group(0))
-                            if t_attr_m_desc:
-                                idx_desc = int(raw_desc)
-                                desc_val = ss_values[idx_desc] if idx_desc < len(ss_values) else raw_desc
-                            else:
-                                desc_val = raw_desc
-                        
-                        # Extraer número de cuenta del patrón "CUENTA XXXX"
-                        cuenta_match = re.search(r"CUENTA\s+(\d+)", desc_val)
-                        if cuenta_match:
-                            row_account = cuenta_match.group(1)
-                            should_mark = row_account in filter_accounts
-                
-                if should_mark:
-                    rows_to_mark.append(rn)
+                    if amt_cell_m:
+                        amt_inner = amt_cell_m.group(1)
+                        v_m_amt = re.search(r"<v>([^<]+)</v>", amt_inner)
+                        if v_m_amt:
+                            raw_amt = v_m_amt.group(1).strip()
+                            t_attr_m_amt = re.search(r't="s"', amt_cell_m.group(0))
+                            if t_attr_m_amt:
+                                idx_amt = int(raw_amt)
+                                raw_amt = ss_values[idx_amt] if idx_amt < len(ss_values) else raw_amt
+                            parsed_amt = _parse_amount(raw_amt)
+                            if parsed_amt is not None:
+                                row_amount_abs = abs(parsed_amt)
+
+                for cand_account, cand_amount_abs in strict_index.get(aux_val, []):
+                    if not row_account_norm or row_account_norm != cand_account:
+                        continue
+
+                    key = (aux_val, cand_account, cand_amount_abs)
+                    if row_amount_abs is None:
+                        strict_unreadable_amount_accounts.add((aux_val, cand_account))
+                        continue
+
+                    diff = abs(row_amount_abs - cand_amount_abs)
+                    prev = strict_best_amount_diff.get(key)
+                    strict_best_amount_diff[key] = diff if prev is None else min(prev, diff)
+
+                    if diff <= abs(float(amount_tolerance)):
+                        strict_row_match = True
+                        strict_hit_keys.add(key)
+
+            if should_mark and strict_index:
+                should_mark = strict_row_match
+
+            if should_mark:
+                rows_to_mark.append(rn)
 
         if debug_info is not None:
-            debug_info["reconciled_set_sample"] = list(reconciled_set)[:10]
             debug_info["rows_to_mark"] = rows_to_mark[:20]
+            debug_info["rows_to_mark_count"] = len(rows_to_mark)
             debug_info["xml_aux_vals_sample"] = _dbg_aux_vals
+            debug_info["strict_hit_count"] = len(strict_hit_keys)
+            debug_info["strict_seen_aux_count"] = len(strict_seen_aux)
+            debug_info["strict_seen_aux_account_count"] = len(strict_seen_aux_account)
+
+        if strict_expected_keys and require_full_strict_match:
+            missing_keys = sorted(strict_expected_keys - strict_hit_keys)
+            if missing_keys:
+                tol_abs = abs(float(amount_tolerance))
+                missing_sample = []
+                for k in missing_keys[:10]:
+                    aux_k, acc_k, amt_k = k
+                    if aux_k not in strict_seen_aux:
+                        reason = "Aux_Fact no encontrado en la hoja de trabajo."
+                    elif (aux_k, acc_k) not in strict_seen_aux_account:
+                        reason = "Aux_Fact encontrado, pero sin coincidencia de cuenta."
+                    elif col_amount_letter is None:
+                        reason = "No existe columna Importe para validar monto."
+                    elif (aux_k, acc_k) in strict_unreadable_amount_accounts:
+                        reason = "No se pudo leer o interpretar el Importe en la fila candidata."
+                    else:
+                        best_diff = strict_best_amount_diff.get(k)
+                        if best_diff is None:
+                            reason = "No se encontró combinación Aux_Fact + cuenta con monto comparable."
+                        else:
+                            reason = (
+                                f"Monto fuera de tolerancia: diferencia mínima {best_diff:.2f} "
+                                f"> tolerancia {tol_abs:.2f}."
+                            )
+
+                    missing_sample.append({
+                        "aux_fact": aux_k,
+                        "account_id": acc_k,
+                        "amount_abs": round(amt_k, 2),
+                        "reason": reason,
+                    })
+                raise ValueError(
+                    "Write-back estricto incompleto: "
+                    f"{len(strict_hit_keys)}/{len(strict_expected_keys)} registros marcables. "
+                    f"Faltantes (muestra): {missing_sample}"
+                )
 
         if not rows_to_mark:
             return src_bytes
 
-        # ── 3. Agregar "SÍ" a sharedStrings.xml ─────────────────────────────
+        # ── 5. Asegurar sharedString "SÍ" ──────────────────────────────────
         si_idx: int | None = None
         for i, val in enumerate(ss_values):
             if val == "SÍ":
@@ -544,30 +705,28 @@ class ExcelReporter:
                 break
 
         if si_idx is None:
-            si_idx = len(ss_values)     # nuevo índice (0-based = actual count)
+            si_idx = len(ss_values)
             new_ss_xml = orig_ss_xml.replace("</sst>", "<si><t>SÍ</t></si></sst>")
-            # Actualizar contadores de atributos count / uniqueCount
             new_ss_xml = re.sub(
                 r'count="(\d+)"',
                 lambda m: f'count="{int(m.group(1)) + len(rows_to_mark)}"',
-                new_ss_xml, count=1,
+                new_ss_xml,
+                count=1,
             )
             new_ss_xml = re.sub(
                 r'uniqueCount="(\d+)"',
                 lambda m: f'uniqueCount="{int(m.group(1)) + 1}"',
-                new_ss_xml, count=1,
+                new_ss_xml,
+                count=1,
             )
         else:
             new_ss_xml = orig_ss_xml
 
-        # ── 4. Parchear el worksheet XML directamente ────────────────────────
-        # Para cada fila a marcar: eliminar celdas AT / AU existentes e
-        # insertar las nuevas en la posición correcta (orden de columnas).
+        # ── 6. Parchear worksheet XML ───────────────────────────────────────
         rows_set = set(rows_to_mark)
         date_str = match_date.strftime("%d/%m/%Y")
 
         def _col2num(col: str) -> int:
-            """Convierte letra(s) de columna Excel a número (A=1, Z=26, AA=27…)."""
             n = 0
             for ch in col.upper():
                 n = n * 26 + (ord(ch) - 64)
@@ -584,39 +743,31 @@ class ExcelReporter:
             if rn not in rows_set:
                 return row_txt
 
-            # Quitar celdas AT y AU actuales si existen (auto-close y con contenido)
             if col_conc_letter:
+                row_txt = re.sub(rf'<c\s+r="{col_conc_letter}{rn}"[^/]*/>', "", row_txt)
                 row_txt = re.sub(
-                    rf'<c\s+r="{col_conc_letter}{rn}"[^/]*/>', "", row_txt
-                )
-                row_txt = re.sub(
-                    rf'<c\s+r="{col_conc_letter}{rn}"[^>]*>.*?</c>', "",
-                    row_txt, flags=re.DOTALL,
+                    rf'<c\s+r="{col_conc_letter}{rn}"[^>]*>.*?</c>',
+                    "",
+                    row_txt,
+                    flags=re.DOTALL,
                 )
             if col_fecha_letter:
+                row_txt = re.sub(rf'<c\s+r="{col_fecha_letter}{rn}"[^/]*/>', "", row_txt)
                 row_txt = re.sub(
-                    rf'<c\s+r="{col_fecha_letter}{rn}"[^/]*/>', "", row_txt
-                )
-                row_txt = re.sub(
-                    rf'<c\s+r="{col_fecha_letter}{rn}"[^>]*>.*?</c>', "",
-                    row_txt, flags=re.DOTALL,
+                    rf'<c\s+r="{col_fecha_letter}{rn}"[^>]*>.*?</c>',
+                    "",
+                    row_txt,
+                    flags=re.DOTALL,
                 )
 
-            # Construir nuevas celdas
             new_cells = ""
             if col_conc_letter:
-                new_cells += (
-                    f'<c r="{col_conc_letter}{rn}" t="s"><v>{si_idx}</v></c>'
-                )
+                new_cells += f'<c r="{col_conc_letter}{rn}" t="s"><v>{si_idx}</v></c>'
             if col_fecha_letter:
                 new_cells += (
-                    f'<c r="{col_fecha_letter}{rn}" t="inlineStr">'
-                    f"<is><t>{date_str}</t></is></c>"
+                    f'<c r="{col_fecha_letter}{rn}" t="inlineStr"><is><t>{date_str}</t></is></c>'
                 )
 
-            # Insertar en la posición correcta de columna, no al final.
-            # OOXML exige que las celdas de una fila estén en orden ascendente
-            # de columna; si hay celdas AV, AW… después de AU, insertar antes.
             insert_pos = None
             for cell_m in re.finditer(rf'<c\s+r="([A-Z]+){rn}"', row_txt):
                 if _col2num(cell_m.group(1)) > _fecha_col_num:
@@ -625,15 +776,11 @@ class ExcelReporter:
 
             if insert_pos is not None:
                 return row_txt[:insert_pos] + new_cells + row_txt[insert_pos:]
-            else:
-                return row_txt.replace("</row>", new_cells + "</row>")
+            return row_txt.replace("</row>", new_cells + "</row>")
 
-        new_ws_xml = re.sub(
-            r"<row\b[^>]*>.*?</row>", _patch_row, orig_ws_xml, flags=re.DOTALL
-        )
+        new_ws_xml = re.sub(r"<row\b[^>]*>.*?</row>", _patch_row, orig_ws_xml, flags=re.DOTALL)
 
-        # ── 5. Construir ZIP de salida ────────────────────────────────────────
-        # Idéntico al original, solo se reemplazan sheet5.xml y sharedStrings
+        # ── 7. ZIP de salida ─────────────────────────────────────────────────
         output_buf = io.BytesIO()
         with zipfile.ZipFile(output_buf, "w", zipfile.ZIP_DEFLATED) as out_zip:
             for item, data in all_entries:

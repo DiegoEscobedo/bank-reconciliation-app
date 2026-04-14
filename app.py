@@ -1006,11 +1006,13 @@ if _dl_cols:
     if results.get("_is_papel_trabajo"):
         # Recopilar Aux_Facts de los movimientos JDE conciliados
         _conciliados_jde = results.get("conciliated_jde_movements", pd.DataFrame())
+        _strict_entries = []
         if "_aux_fact" in _conciliados_jde.columns:
             _aux_facts = []
-            for _v in _conciliados_jde["_aux_fact"].dropna().unique():
+            for _, _row in _conciliados_jde.iterrows():
+                _v = _row.get("_aux_fact")
                 _sv = str(_v).strip()
-                if _sv in ("", "nan", "None"):
+                if _sv in ("", "nan", "None", "NaT"):
                     continue
                 # Normalizar float a entero: "2647414.0" → "2647414"
                 try:
@@ -1018,6 +1020,17 @@ if _dl_cols:
                 except (ValueError, OverflowError):
                     pass
                 _aux_facts.append(_sv)
+
+                _acc = str(_row.get("account_id", "") or "").strip()
+                _amt = _row.get("amount_signed", None)
+                if _acc and pd.notna(_amt):
+                    _strict_entries.append({
+                        "aux_fact": _sv,
+                        "account_id": _acc,
+                        "amount_signed": float(_amt),
+                    })
+
+            _aux_facts = sorted(set(_aux_facts))
         else:
             _aux_facts = []
 
@@ -1039,7 +1052,10 @@ if _dl_cols:
                 _bank_accounts_last4 = [acct[-4:] for acct in _bank_accounts]
                 _pt_bytes = _reporter.write_back_conciliados(
                     _pt_source, _aux_facts, match_date=_fecha_conciliacion, 
-                    filter_accounts=_bank_accounts_last4
+                    filter_accounts=_bank_accounts_last4,
+                    strict_match_entries=_strict_entries,
+                    amount_tolerance=float(results.get("_amount_tolerance", amount_tolerance_ui)),
+                    require_full_strict_match=True,
                 )
                 with _dl_buttons[_btn_idx]:
                     # Usar la fecha elegida por el usuario o la de hoy

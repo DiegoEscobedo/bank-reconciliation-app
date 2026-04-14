@@ -20,6 +20,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
 from config.settings import TIENDA_ABBREV as _TIENDA_ABBREV
+from src.utils.amount_utils import clean_amount
 from src.utils.date_utils import looks_like_date, parse_date_spanish
 from src.utils.logger import get_logger
 
@@ -369,6 +370,16 @@ class _NetPayParser(_BaseBankParser):
     _COL_ACCOUNT = ("CUENTA DESTINO", "CUENTA DEPÓSITO", "CUENTA DEPOSITO", "CUENTA")
     _COL_DESC    = ("SUCURSAL", "DESCRIPCIÓN", "DESCRIPCION", "CLAVE RASTREO", "CLAVE DE RASTREO", "REFERENCIA")
     _COL_AMOUNT  = ("MONTO DE TRX", "MONTO DE TRANSACCIÓN", "MONTO TRX", "MONTO TRANSACCION", "MONTO DEPÓSITO", "MONTO DEPOSITO", "MONTO")
+    # Priorizar columna consolidada cuando exista (p.ej. "Comisiones + IVA").
+    _COL_COMMISSION = (
+        "COMISIONES + IVA",
+        "COMISION TOTAL ($)",
+        "COMISION TOTAL",
+        "COMISIONES",
+        "COMISIÓN",
+        "COMISION",
+    )
+    _COL_IVA = ("IVA", "I.V.A", "I.V.A.")
 
     def parse_raw(self, raw: pd.DataFrame) -> pd.DataFrame:
         # ── 1. Detectar fila de encabezado ────────────────────────────
@@ -408,21 +419,54 @@ class _NetPayParser(_BaseBankParser):
         idx_account = _find_col(self._COL_ACCOUNT, default=4)
         idx_desc    = _find_col(self._COL_DESC,    default=5)
         idx_amount  = _find_col(self._COL_AMOUNT,  default=6)
+        idx_commission = _find_col(self._COL_COMMISSION, default=None)
+        idx_iva = _find_col(self._COL_IVA, default=None)
+
+        # Identificar si la columna de comisión ya representa el total final
+        # ("Comisiones + IVA"), para NO sumar IVA nuevamente.
+        commission_header = ""
+        if idx_commission is not None and idx_commission < len(raw.columns):
+            commission_header = str(raw.iloc[header_row_idx, idx_commission]).strip().upper()
+        commission_is_combined_total = (
+            idx_commission is not None
+            and "COMISION" in commission_header
+            and "IVA" in commission_header
+        )
+
+        if commission_is_combined_total:
+            idx_iva = None
+
+        # Evitar doble conteo cuando "comisión" e "IVA" resuelven a la misma
+        # columna (común si el header contiene textos como "Comisiones + IVA").
+        if idx_commission is not None and idx_iva == idx_commission:
+            idx_iva = None
 
         logger.info(
-            "[NETPAY] Header fila=%d | fecha=%d cuenta=%d desc=%d monto=%d",
-            header_row_idx, idx_date, idx_account, idx_desc, idx_amount,
+            "[NETPAY] Header fila=%d | fecha=%d cuenta=%d desc=%d monto=%d comision=%s iva=%s",
+            header_row_idx, idx_date, idx_account, idx_desc, idx_amount, idx_commission, idx_iva,
         )
 
         # ── 2. Extraer filas de datos ─────────────────────────────────
         data = raw.iloc[header_row_idx + 1:].copy().reset_index(drop=True)
         data = data.fillna("").astype(str)
 
-        # Filtrar filas vacías o de totales
+        # Filtrar filas vacías o de totales.
+        # Para comisiones NetPay conservar también filas con comisión/IVA aunque
+        # el monto de trx esté vacío.
+        _date_col = data.iloc[:, idx_date].str.strip()
+        _amount_col = data.iloc[:, idx_amount].str.strip()
+        _has_amount = _amount_col.ne("")
+        _has_comm = pd.Series(False, index=data.index)
+        _has_iva = pd.Series(False, index=data.index)
+        if idx_commission is not None:
+            _has_comm = data.iloc[:, idx_commission].str.strip().ne("")
+        if idx_iva is not None:
+            _has_iva = data.iloc[:, idx_iva].str.strip().ne("")
+
         data = data[
-            data.iloc[:, idx_date].str.strip().ne("") &
-            data.iloc[:, idx_date].str.strip().str.upper().ne("TOTAL") &
-            data.iloc[:, idx_amount].str.strip().ne("")
+            _date_col.ne("")
+            & _date_col.str.upper().ne("TOTAL")
+            & (_has_amount | _has_comm | _has_iva)
         ].copy().reset_index(drop=True)
 
         if data.empty:
@@ -434,24 +478,69 @@ class _NetPayParser(_BaseBankParser):
         account_id = str(data.iloc[0, idx_account]).strip()
         logger.info("[NETPAY] Cuenta destino: %s", account_id)
 
+        # Movimientos base de venta (depósitos)
+        sales_mask = data.iloc[:, idx_amount].str.strip().ne("")
+        sales_data = data.loc[sales_mask].copy()
+
         result = pd.DataFrame({
             "account_id":         account_id,
             "bank":               self.BANK_NAME,
-            "raw_date":           data.iloc[:, idx_date].str.strip(),
-            "description":        data.iloc[:, idx_desc].str.strip(),
+            "raw_date":           sales_data.iloc[:, idx_date].str.strip(),
+            "description":        sales_data.iloc[:, idx_desc].str.strip(),
             "description_detail": "",
-            "raw_deposit":        data.iloc[:, idx_amount].str.strip(),
+            "raw_deposit":        sales_data.iloc[:, idx_amount].str.strip(),
             "raw_withdrawal":     "",
         })
         result = result.reset_index(drop=True)
         # Mapear Sucursal → tienda (abreviatura JDE) usando TIENDA_ABBREV
         result["tienda"] = (
-            data.iloc[:, idx_desc].str.strip().str.upper()
+            sales_data.iloc[:, idx_desc].str.strip().str.upper()
             .map(_TIENDA_ABBREV)
             .fillna("")
         )
         # NetPay no trae tipo de pago en su Excel origen; por negocio se trata como TPV.
         result["tipo_banco"] = "TPV"
+
+        # Generar UN SOLO movimiento de COMISION NETPAY como retiro:
+        # monto_comision_total = suma de (Comisiones + IVA) de todas las filas.
+        # Si no encuentra match en JDE, quedará pendiente automáticamente.
+        if idx_commission is not None:
+            commission_amount = data.iloc[:, idx_commission].apply(clean_amount)
+            if idx_iva is not None:
+                commission_amount = commission_amount + data.iloc[:, idx_iva].apply(clean_amount)
+            commission_amount = commission_amount.abs().round(2)
+
+            commission_mask = commission_amount > 0
+            if commission_mask.any():
+                commission_total = round(float(commission_amount[commission_mask].sum()), 2)
+                # Usar la fecha más reciente de las filas con comisión para acercar el posting en JDE.
+                commission_date = (
+                    data.loc[commission_mask, data.columns[idx_date]]
+                    .astype(str)
+                    .str.strip()
+                    .iloc[-1]
+                )
+                commission_row = pd.DataFrame([
+                    {
+                        "account_id": account_id,
+                        "bank": self.BANK_NAME,
+                        "raw_date": commission_date,
+                        "description": "NETPAY | COMISION TOTAL + IVA",
+                        "description_detail": "COMISIONES NETPAY CONSOLIDADAS (COMISION + IVA)",
+                        "raw_deposit": "",
+                        "raw_withdrawal": f"{commission_total:.2f}",
+                        # Consolidado global: sin tienda para no forzar cruce por sucursal.
+                        "tienda": "",
+                        "tipo_banco": "TPV",
+                    }
+                ])
+
+                result = pd.concat([result, commission_row], ignore_index=True)
+                logger.info(
+                    "[NETPAY] Comision consolidada generada: 1 fila (origen=%d), total=%.2f",
+                    int(commission_mask.sum()),
+                    commission_total,
+                )
         # Diagnóstico: mostrar primeras filas extraídas
         for _ri in range(min(3, len(result))):
             logger.info(
