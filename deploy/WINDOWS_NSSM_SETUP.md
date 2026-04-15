@@ -18,6 +18,7 @@ Dejar la aplicacion ejecutandose como servicio para que:
 - Git instalado.
 - Python 3.11 instalado.
 - Puerto asignado para la app (recomendado: 8501, o el que autorice infraestructura).
+- Definir cuenta de servicio dedicada (ejemplo: `svc_bankrec`) para ejecutar la app.
 
 ## 3. Estructura recomendada
 
@@ -40,6 +41,33 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+### 4.1 Cuenta de servicio de bajo privilegio (recomendado)
+
+Despues de la instalacion base, crear un usuario dedicado para ejecutar el servicio.
+
+```powershell
+$SvcUser = "svc_bankrec"
+$SvcPass = Read-Host "Password para $SvcUser" -AsSecureString
+
+if (-not (Get-LocalUser -Name $SvcUser -ErrorAction SilentlyContinue)) {
+  New-LocalUser -Name $SvcUser -Password $SvcPass -AccountNeverExpires
+}
+
+# Mantenerlo como usuario estandar (sin privilegios de administrador)
+Add-LocalGroupMember -Group "Users" -Member $SvcUser -ErrorAction SilentlyContinue
+```
+
+Asignar permisos minimos sobre la carpeta de la app (lectura/escritura/ejecucion para operar logs y archivos temporales):
+
+```powershell
+icacls "C:\apps\bank-reconciliation-app" /grant "${SvcUser}:(OI)(CI)M" /T
+```
+
+Conceder derecho **Log on as a service** al usuario `svc_bankrec`:
+
+- Opcion GUI: `secpol.msc` -> Local Policies -> User Rights Assignment -> Log on as a service.
+- Agregar el usuario `svc_bankrec` y aplicar politicas.
 
 ## 5. Prueba manual antes del servicio
 
@@ -86,6 +114,16 @@ C:\tools\nssm\nssm.exe set BankReconciliationApp AppDirectory "C:\apps\bank-reco
 ```powershell
 C:\tools\nssm\nssm.exe set BankReconciliationApp Start SERVICE_AUTO_START
 ```
+
+### 7.4 Configurar cuenta de servicio en NSSM
+
+Registrar el servicio para que corra con la cuenta dedicada (no administrador local):
+
+```powershell
+C:\tools\nssm\nssm.exe set BankReconciliationApp ObjectName ".\\svc_bankrec" "TU_PASSWORD"
+```
+
+Nota: reemplazar `TU_PASSWORD` por la contrasena real de `svc_bankrec`.
 
 ## 8. Logs recomendados
 
@@ -177,6 +215,7 @@ Restart-Service BankReconciliationApp
 ## 14. Checklist de cierre
 
 - Servicio creado y en `Running`.
+- Servicio ejecutando con cuenta dedicada de bajo privilegio (ej. `svc_bankrec`).
 - Puerto accesible desde red autorizada.
 - Firewall aplicado para el puerto de la app.
 - Logs de salida y error configurados.

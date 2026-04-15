@@ -99,6 +99,8 @@ Se recomienda NSSM para ejecutar Streamlit como servicio.
 
 1. Instalar NSSM (Non-Sucking Service Manager).
 2. Crear servicio con los siguientes parametros:
+3. Configurar el servicio para correr con cuenta dedicada de bajo privilegio
+  (ejemplo: `svc_bankrec`), no con administrador local.
 
 - Path: C:\apps\bank-reconciliation-app\.venv\Scripts\python.exe
 - Startup directory: C:\apps\bank-reconciliation-app
@@ -112,6 +114,16 @@ nssm install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv\Script
 nssm set BankReconciliationApp AppDirectory "C:\apps\bank-reconciliation-app"
 nssm start BankReconciliationApp
 ```
+
+Configuracion de cuenta de servicio (ejemplo):
+
+```powershell
+nssm set BankReconciliationApp ObjectName ".\svc_bankrec" "TU_PASSWORD"
+```
+
+Detalle completo de pasos y permisos:
+
+- Ver [deploy/WINDOWS_NSSM_SETUP.md](deploy/WINDOWS_NSSM_SETUP.md)
 
 ## 10. Publicacion y acceso
 
@@ -147,3 +159,44 @@ Get-Process -Id (Get-NetTCPConnection -LocalPort 8501 -State Listen).OwningProce
 ## 14. Alcance
 
 Este esquema define operacion en servidor compartido Windows y no modifica el flujo local de desarrollo.
+
+## 15. Checklist Go-Live (Intranet + VPN + ACL estrictas)
+
+Usar este checklist antes de liberar a operacion.
+
+### 15.1 Red y acceso
+
+- [ ] 1. El servidor solo es accesible por red corporativa (LAN/VPN), sin publicacion directa a Internet.
+- [ ] 2. La regla de firewall del puerto de la app limita origenes a subredes autorizadas (no Any).
+- [ ] 3. Se validaron pruebas de acceso: permitido desde VPN corporativa y denegado desde red no autorizada.
+
+### 15.2 Servicio y privilegios
+
+- [ ] 4. El servicio corre con cuenta dedicada de bajo privilegio (no administrador local).
+- [ ] 5. El servicio inicia automaticamente en reinicio del servidor.
+- [ ] 6. Se confirmo que el servicio queda en Running y escucha en el puerto esperado.
+
+### 15.3 Sistema de archivos y datos
+
+- [ ] 7. La carpeta de aplicacion tiene permisos NTFS minimos (solo cuenta de servicio y admins).
+- [ ] 8. Las carpetas de data y logs estan protegidas con el mismo criterio de minimo privilegio.
+- [ ] 9. No se dejaron archivos de prueba con datos sensibles en rutas compartidas.
+
+### 15.4 Configuracion operativa
+
+- [ ] 10. El puerto de la app no colisiona con otros sistemas del mismo servidor.
+- [ ] 11. Se definio nombre y responsable operativo del servicio (dueno tecnico + respaldo).
+- [ ] 12. Se documento procedimiento de reinicio y recuperacion ante falla.
+
+### 15.5 Logging, respaldo y mantenimiento
+
+- [ ] 13. Logs habilitados y verificados, sin exponer informacion sensible innecesaria.
+- [ ] 14. Respaldo diario configurado para scripts, configuracion y salida operativa critica.
+- [ ] 15. Se realizo prueba de restauracion (archivo o carpeta) con evidencia.
+
+### 15.6 Criterio de salida
+
+Go-Live aprobado cuando:
+
+- Los 15 puntos estan en cumplimiento.
+- Existe evidencia minima (capturas o bitacora tecnica) de los puntos 2, 3, 6, 14 y 15.
