@@ -30,6 +30,8 @@ class ReconciliationEngine:
 
     # Mapeo tipo banco → set de tipos JDE compatibles (centralizado en settings)
     _TIPO_MAP: dict = TIPO_BANCO_TO_JDE_COMPAT
+    # Comisiones consolidadas de estas fuentes no deben depender de tienda.
+    _STORELESS_COMMISSION_BANKS: set[str] = {"NETPAY", "MERCADOPAGO", "MERCADO PAGO"}
 
     def __init__(self):
         self.amount_tolerance = AMOUNT_TOLERANCE
@@ -121,8 +123,9 @@ class ReconciliationEngine:
             bank_idx = proposal["bank_row_index"]
             bank_row = bank_df.loc[bank_idx]
             bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
+            ignore_store_for_commission = self._is_storeless_commission_bank_row(bank_row)
             
-            if "tienda" in jde_df.columns and bank_tienda:
+            if "tienda" in jde_df.columns and bank_tienda and not ignore_store_for_commission:
                 jde_tiendas = set()
                 for jde_idx in proposal["jde_row_indices"]:
                     jde_tienda = str(jde_df.at[jde_idx, "tienda"] or "").strip().upper()
@@ -164,8 +167,19 @@ class ReconciliationEngine:
             jde_idx = proposal["jde_row_index"]
             jde_row = jde_df.loc[jde_idx]
             jde_tienda = str(jde_row.get("tienda") or "").strip().upper()
+            selected_bank_rows = bank_df.loc[proposal["bank_row_indices"]]
+            selected_banks = selected_bank_rows.get("bank", pd.Series(dtype=object)).apply(self._normalize_bank_name)
+            normalized_allowed = {
+                self._normalize_bank_name(v) for v in self._STORELESS_COMMISSION_BANKS
+            }
+            reverse_is_storeless_commission = (
+                self._row_is_commission(jde_row)
+                and not selected_banks.empty
+                and selected_banks.ne("").all()
+                and selected_banks.isin(normalized_allowed).all()
+            )
             
-            if "tienda" in bank_df.columns and jde_tienda:
+            if "tienda" in bank_df.columns and jde_tienda and not reverse_is_storeless_commission:
                 bank_tiendas = set()
                 for bank_idx in proposal["bank_row_indices"]:
                     bank_tienda = str(bank_df.at[bank_idx, "tienda"] or "").strip().upper()
@@ -307,6 +321,10 @@ class ReconciliationEngine:
         tienda y en tipo compatible.  Si no hay info, devuelve los mismos
         candidates sin cambios (comportamiento backward-compatible).
         """
+        # Comisiones consolidadas MP/NetPay: no filtrar por tienda.
+        if self._is_storeless_commission_bank_row(bank_row):
+            return candidates
+
         # Verificar que exista info de tienda en ambos lados
         bank_tienda = ""
         try:
@@ -401,6 +419,38 @@ class ReconciliationEngine:
     @classmethod
     def _es_comision(cls, description: str) -> bool:
         return bool(cls._COMISION_RE.search(str(description or "")))
+
+    @classmethod
+    def _normalize_bank_name(cls, value: object) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value).strip().upper().replace(" ", "")
+
+    @classmethod
+    def _row_is_commission(cls, row) -> bool:
+        desc = ""
+        mvtype = ""
+        try:
+            desc = row.get("description") if hasattr(row, "get") else row["description"]
+        except (KeyError, TypeError):
+            pass
+        try:
+            mvtype = str(row.get("movement_type") if hasattr(row, "get") else row["movement_type"]).strip().upper()
+        except (KeyError, TypeError):
+            pass
+        return mvtype == "COM" or cls._es_comision(desc)
+
+    def _is_storeless_commission_bank_row(self, row) -> bool:
+        bank_name = ""
+        try:
+            bank_name = row.get("bank") if hasattr(row, "get") else row["bank"]
+        except (KeyError, TypeError):
+            pass
+        normalized_bank = self._normalize_bank_name(bank_name)
+        normalized_allowed = {
+            self._normalize_bank_name(v) for v in self._STORELESS_COMMISSION_BANKS
+        }
+        return normalized_bank in normalized_allowed and self._row_is_commission(row)
 
     def _filter_by_comision(
         self,
@@ -509,11 +559,12 @@ class ReconciliationEngine:
 
             # EXACT MATCH: Validación OBLIGATORIA de tienda
             # Si existe tienda en banco O JDE, DEBEN coincidir exactamente
+            ignore_store_for_commission = self._is_storeless_commission_bank_row(bank_row)
             bank_tienda = str(bank_row.get("tienda") or "").strip().upper()
             if bank_tienda == "NO ENCONTRADO":
                 bank_tienda = ""
             enforce_store_ambiguity_on_amount = False
-            if "tienda" in potential_jde_candidates.columns:
+            if "tienda" in potential_jde_candidates.columns and not ignore_store_for_commission:
                 potential_jde_candidates["jde_tienda"] = (
                     potential_jde_candidates["tienda"].fillna("").astype(str).str.strip().str.upper()
                 )

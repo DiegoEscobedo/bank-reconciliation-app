@@ -64,6 +64,18 @@ class GroupedMatcher:
 	def _is_bank_in_commission_bias_scope(self, value) -> bool:
 		return self._normalize_text(value) in self._commission_bias_banks
 
+	def _is_storeless_commission_bank_scope(self, candidates: "pd.DataFrame") -> bool:
+		if "bank" not in candidates.columns or candidates.empty:
+			return False
+		normalized_allowed = {
+			self.engine._normalize_bank_name(v)
+			for v in self.engine._STORELESS_COMMISSION_BANKS
+		}
+		normalized_banks = candidates["bank"].apply(self.engine._normalize_bank_name)
+		if normalized_banks.empty or normalized_banks.eq("").any():
+			return False
+		return normalized_banks.isin(normalized_allowed).all()
+
 	@classmethod
 	def _is_jde_commission_row(cls, row) -> bool:
 		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
@@ -154,6 +166,9 @@ class GroupedMatcher:
 		- Si banco no tiene tienda -> solo JDE sin tienda/NO ENCONTRADO.
 		"""
 		if not getattr(self.engine, "enforce_grouped_strict_tienda", False):
+			return candidates
+
+		if self.engine._is_storeless_commission_bank_row(bank_row):
 			return candidates
 
 		if "tienda" not in candidates.columns:
@@ -533,7 +548,14 @@ class GroupedMatcher:
 			except (KeyError, TypeError):
 				pass
 
-			if "tienda" in available_bank.columns and getattr(self.engine, "enforce_grouped_strict_tienda", False):
+			reverse_ignore_store_for_commission = (
+				jde_is_commission and self._is_storeless_commission_bank_scope(available_bank)
+			)
+			if (
+				"tienda" in available_bank.columns
+				and getattr(self.engine, "enforce_grouped_strict_tienda", False)
+				and not reverse_ignore_store_for_commission
+			):
 				bank_tienda_upper = available_bank["tienda"].fillna("").str.strip().str.upper()
 				if jde_tienda:
 					available_bank = available_bank[

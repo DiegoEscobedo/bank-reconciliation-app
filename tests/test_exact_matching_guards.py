@@ -496,5 +496,55 @@ class TestExactMatchingGuards(unittest.TestCase):
         result = engine.reconcile(bank_df, jde_df)
         self.assertEqual(result["summary"]["exact_matches_count"], 0)
 
+    def test_netpay_commission_exact_ignores_store_ambiguity(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-11"),
+                "description": "NETPAY | COMISION TOTAL + IVA",
+                "amount_signed": -250.0,
+                "abs_amount": 250.0,
+                "movement_type": "RETIRO",
+                "source": "BANK",
+                "bank": "NETPAY",
+                "tienda": "",
+                "tipo_banco": "03",
+            }
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-11"),
+                "description": "COMISION TARJETA SUC A",
+                "doc_type": "JE",
+                "document": "1",
+                "amount_signed": -250.0,
+                "abs_amount": 250.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "A1",
+                "tipo_jde": "03",
+            },
+            {
+                "account_id": "6614",
+                "movement_date": pd.Timestamp("2026-04-11"),
+                "description": "COMISION TARJETA SUC B",
+                "doc_type": "JE",
+                "document": "2",
+                "amount_signed": -250.0,
+                "abs_amount": 250.0,
+                "movement_type": "RETIRO",
+                "source": "JDE",
+                "tienda": "B1",
+                "tipo_jde": "03",
+            },
+        ])
+
+        result = engine.reconcile(bank_df, jde_df)
+        self.assertEqual(result["summary"]["exact_matches_count"], 1)
+
 if __name__ == "__main__":
     unittest.main()

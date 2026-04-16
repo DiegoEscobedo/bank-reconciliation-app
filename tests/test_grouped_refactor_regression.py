@@ -335,6 +335,53 @@ class TestGroupedRefactorRegression(unittest.TestCase):
         self.assertEqual(result["summary"]["pending_bank_count"], 0)
         self.assertEqual(result["summary"]["pending_jde_count"], 0)
 
+    def test_reverse_grouped_mp_commission_ignores_store_mismatch(self):
+        engine = ReconciliationEngine()
+
+        bank_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "abs_amount": 10.0,
+                "movement_date": pd.Timestamp("2026-04-12"),
+                "movement_type": "RETIRO",
+                "description": "MERCADO PAGO | COMISION",
+                "tienda": "A1",
+                "tipo_banco": "03",
+                "bank": "MERCADOPAGO",
+            },
+            {
+                "account_id": "7133",
+                "abs_amount": 7.4,
+                "movement_date": pd.Timestamp("2026-04-12"),
+                "movement_type": "RETIRO",
+                "description": "MERCADO PAGO | COMISION IVA",
+                "tienda": "B1",
+                "tipo_banco": "03",
+                "bank": "MERCADOPAGO",
+            },
+        ])
+
+        jde_df = pd.DataFrame([
+            {
+                "account_id": "7133",
+                "abs_amount": 17.4,
+                "movement_date": pd.Timestamp("2026-04-12"),
+                "movement_type": "COM",
+                "description": "COMISION AGRUPADA MP",
+                "tienda": "A1",
+                "tipo_jde": "03",
+            }
+        ])
+
+        interactive = engine.reconcile_interactive(bank_df, jde_df)
+        reverse = interactive["proposed_reverse_grouped_matches"]
+
+        self.assertEqual(len(reverse), 1)
+        self.assertEqual(set(reverse[0]["bank_row_indices"]), {0, 1})
+
+        result = engine.confirm_grouped_matches(interactive, {reverse[0]["group_id"]})
+        self.assertEqual(result["summary"]["reverse_grouped_matches_count"], 1)
+
     def test_reverse_grouped_6614_commission_code_bias_prefers_cod_transac_subset(self):
         engine = ReconciliationEngine()
 
