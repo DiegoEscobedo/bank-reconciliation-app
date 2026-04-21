@@ -37,9 +37,9 @@ Set-Location C:\apps
 git clone https://github.com/DiegoEscobedo/bank-reconciliation-app.git
 Set-Location C:\apps\bank-reconciliation-app
 
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+py -3.11 -m venv .venv_clean
+.\.venv_clean\Scripts\python.exe -m pip install --upgrade pip
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ### 4.1 Cuenta de servicio de bajo privilegio (recomendado)
@@ -75,7 +75,7 @@ Validar primero que la app corre correctamente:
 
 ```powershell
 Set-Location C:\apps\bank-reconciliation-app
-.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+.\.venv_clean\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 Verificar acceso:
@@ -100,7 +100,7 @@ C:\tools\nssm\nssm.exe version
 ### 7.1 Crear servicio
 
 ```powershell
-C:\tools\nssm\nssm.exe install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+C:\tools\nssm\nssm.exe install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
 ```
 
 ### 7.2 Configurar directorio de trabajo
@@ -117,13 +117,13 @@ C:\tools\nssm\nssm.exe set BankReconciliationApp Start SERVICE_AUTO_START
 
 ### 7.4 Configurar cuenta de servicio en NSSM
 
-Registrar el servicio para que corra con la cuenta dedicada (no administrador local):
+Registrar el servicio para que corra con la cuenta dedicada (no administrador local).
 
-```powershell
-C:\tools\nssm\nssm.exe set BankReconciliationApp ObjectName ".\\svc_bankrec" "TU_PASSWORD"
-```
+Recomendacion de seguridad:
 
-Nota: reemplazar `TU_PASSWORD` por la contrasena real de `svc_bankrec`.
+- Evitar contrasenas en linea de comandos, scripts o capturas de pantalla.
+- Configurar usuario y contrasena del servicio desde `services.msc` -> servicio `BankReconciliationApp` -> pestana **Log On**.
+- Rotar contrasena de `svc_bankrec` segun politica corporativa y conservar evidencia operativa.
 
 ## 8. Logs recomendados
 
@@ -139,8 +139,10 @@ C:\tools\nssm\nssm.exe set BankReconciliationApp AppStderr "C:\apps\bank-reconci
 Abrir el puerto asignado (ejemplo 8501):
 
 ```powershell
-New-NetFirewallRule -DisplayName "BankReconciliation-8501" -Direction Inbound -Protocol TCP -LocalPort 8501 -Action Allow
+New-NetFirewallRule -DisplayName "BankReconciliation-8501" -Direction Inbound -Protocol TCP -LocalPort 8501 -RemoteAddress 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 -Action Allow
 ```
+
+Nota: cambiar `-RemoteAddress` por las subredes autorizadas de LAN/VPN corporativa.
 
 Notas de convivencia en servidor compartido:
 
@@ -194,7 +196,7 @@ Restart-Service BankReconciliationApp
   - `C:\apps\bank-reconciliation-app\logs\service_out.log`
   - `C:\apps\bank-reconciliation-app\logs\service_err.log`
 - Confirmar que existe Python en:
-  - `C:\apps\bank-reconciliation-app\.venv\Scripts\python.exe`
+  - `C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe`
 
 ### Puerto no disponible
 
@@ -208,7 +210,7 @@ Si esta ocupado por otro proceso, cambiar puerto en el servicio NSSM.
 
 ```powershell
 Set-Location C:\apps\bank-reconciliation-app
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
 Restart-Service BankReconciliationApp
 ```
 

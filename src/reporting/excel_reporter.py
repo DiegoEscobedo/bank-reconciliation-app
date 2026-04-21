@@ -176,7 +176,7 @@ class ExcelReporter:
 
         if df.empty:
             base_cols = ["Cuenta", "Fecha", "Tienda", "Tipo", "Doc Tipo", "Documento", "Descripción", "Monto", "Origen"] if is_jde \
-                   else ["Cuenta", "Fecha", "Fuente", "Tienda", "Tipo Pago", "Descripción", "Monto", "Origen"]
+                   else ["Cuenta", "Fecha", "Fuente", "Tienda", "Tipo Pago", "Descripción", "Monto", "Origen", "Por qué no concilió"]
             out = pd.DataFrame(columns=base_cols)
         else:
             out = pd.DataFrame()
@@ -199,6 +199,8 @@ class ExcelReporter:
             out["Descripción"] = df["description"]
             out["Monto"]       = df["amount_signed"]
             out["Origen"]      = df["source"]
+            if not is_jde:
+                out["Por qué no concilió"] = df.get("no_match_reason", pd.Series("", index=df.index)).fillna("")
 
         self._df_to_sheet(writer, sheet_name, out, fmt_header, fmt_value, fmt_neg, fmt_pos, fmt_date, fmt_alt, fmt_alt_num, fmt_alt_dt,
                           date_cols=["Fecha"], amount_cols=["Monto"])
@@ -386,9 +388,9 @@ class ExcelReporter:
                 if amt is None:
                     continue
 
-                amt_abs = abs(float(amt))
-                strict_index.setdefault(aux_token, []).append((acc_token, amt_abs))
-                strict_expected_keys.add((aux_token, acc_token, amt_abs))
+                amt_signed = float(amt)
+                strict_index.setdefault(aux_token, []).append((acc_token, amt_signed))
+                strict_expected_keys.add((aux_token, acc_token, amt_signed))
 
         # Normalizar source a bytes en memoria
         if isinstance(source, (bytes, bytearray)):
@@ -606,7 +608,7 @@ class ExcelReporter:
                 if row_account_norm:
                     strict_seen_aux_account.add((aux_val, row_account_norm))
 
-                row_amount_abs: float | None = None
+                row_amount_signed: float | None = None
                 if col_amount_letter is not None:
                     amt_cell_m = re.search(
                         rf'<c\s+r="{col_amount_letter}{rn}"[^>]*>(.*?)</c>',
@@ -624,18 +626,18 @@ class ExcelReporter:
                                 raw_amt = ss_values[idx_amt] if idx_amt < len(ss_values) else raw_amt
                             parsed_amt = _parse_amount(raw_amt)
                             if parsed_amt is not None:
-                                row_amount_abs = abs(parsed_amt)
+                                row_amount_signed = float(parsed_amt)
 
-                for cand_account, cand_amount_abs in strict_index.get(aux_val, []):
+                for cand_account, cand_amount_signed in strict_index.get(aux_val, []):
                     if not row_account_norm or row_account_norm != cand_account:
                         continue
 
-                    key = (aux_val, cand_account, cand_amount_abs)
-                    if row_amount_abs is None:
+                    key = (aux_val, cand_account, cand_amount_signed)
+                    if row_amount_signed is None:
                         strict_unreadable_amount_accounts.add((aux_val, cand_account))
                         continue
 
-                    diff = abs(row_amount_abs - cand_amount_abs)
+                    diff = abs(row_amount_signed - cand_amount_signed)
                     prev = strict_best_amount_diff.get(key)
                     strict_best_amount_diff[key] = diff if prev is None else min(prev, diff)
 
@@ -685,7 +687,7 @@ class ExcelReporter:
                     missing_sample.append({
                         "aux_fact": aux_k,
                         "account_id": acc_k,
-                        "amount_abs": round(amt_k, 2),
+                        "amount_signed": round(amt_k, 2),
                         "reason": reason,
                     })
                 raise ValueError(

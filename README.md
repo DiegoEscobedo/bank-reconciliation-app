@@ -43,6 +43,31 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Runtime recomendado para produccion
+
+- Version de Python objetivo: **3.11.x**
+- Entorno virtual estandar de produccion: **.venv_clean**
+
+Preparacion sugerida en servidor:
+
+```powershell
+py -3.11 -m venv .venv_clean
+.\.venv_clean\Scripts\python.exe -m pip install --upgrade pip
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+## Seguridad de dependencias
+
+- Las dependencias en `requirements.txt` estan fijadas con version exacta para builds reproducibles.
+- Se recomienda validar vulnerabilidades localmente antes de publicar cambios.
+
+Comando local sugerido:
+
+```bash
+pip install pip-audit
+pip-audit -r requirements.txt --strict
+```
+
 ## Estructura principal
 
 ```text
@@ -81,6 +106,7 @@ bank-reconciliation-app/
 - Requisitos: docs/SRS.md
 - Diseno tecnico: docs/SDS.md
 - Manual de operacion: docs/MANUAL_USUARIO.md
+- Checklist seguridad produccion: docs/SECURITY_PRODUCTION_CHECKLIST.md
 - Arquitectura: ARCHITECTURE.md
 - Despliegue en servidor: deploy/README_SERVER.md
 

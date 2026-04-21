@@ -6,6 +6,7 @@ Ejecución:
 """
 
 import io
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,24 @@ from src.parsers.conciliacion_parser import parse_conciliacion_excel, get_pendin
 from src.matching.historical_matcher import match_historical_pendientes, summarize_historical_matches
 
 logger = get_logger(__name__)
+
+
+def _safe_uploaded_name(filename: object, fallback: str) -> str:
+    """Normaliza nombres subidos para evitar rutas/bytes raros en disco temporal."""
+    raw_name = Path(str(filename or "")).name
+    clean = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name).strip("._")
+    if not clean:
+        clean = fallback
+
+    if len(clean) > 120:
+        dot_idx = clean.rfind(".")
+        if dot_idx > 0:
+            ext = clean[dot_idx:]
+            stem = clean[:dot_idx]
+            clean = f"{stem[:100]}{ext[:20]}"
+        else:
+            clean = clean[:120]
+    return clean
 
 
 def _normalize_account_token(value: object) -> str:
@@ -148,6 +167,29 @@ def _add_unmatched_reason_column(
         axis=1,
     )
     return out
+
+
+def _refresh_excel_with_pending_bank_reason(results: dict, pending_bank_diag: pd.DataFrame) -> dict:
+    """
+    Regenera el Excel descargable incluyendo la columna de diagnóstico
+    en la hoja de Pendientes Banco.
+    """
+    if not results.get("_excel_bytes"):
+        return results
+
+    payload = dict(results)
+    payload["pending_bank_movements"] = pending_bank_diag
+
+    try:
+        reporter = ExcelReporter()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+            out_dir = Path(tmp_dir)
+            file_path = reporter.generate(payload, out_dir)
+            payload["_excel_bytes"] = file_path.read_bytes()
+    except Exception as exc:
+        logger.warning("No se pudo regenerar Excel con diagnóstico de pendientes banco: %s", exc)
+
+    return payload
 
 
 def _data_quality_metrics(df: pd.DataFrame, side: str) -> dict:
@@ -320,7 +362,8 @@ if app_mode == "Marcar por batch":
         except Exception as exc:
             st.session_state["batch_mark_preview"] = None
             st.session_state["batch_mark_output"] = None
-            st.error(f"Error al previsualizar por batch: {exc}")
+            logger.exception("Error al previsualizar por batch: %s", exc)
+            st.error("Error al previsualizar por batch. Revisa los logs del servidor.")
 
     batch_preview = st.session_state.get("batch_mark_preview")
     if batch_preview:
@@ -449,7 +492,8 @@ if app_mode == "Marcar por batch":
                 }
             except Exception as exc:
                 st.session_state["batch_mark_output"] = None
-                st.error(f"Error al generar descargable final: {exc}")
+                logger.exception("Error al generar descargable final por batch: %s", exc)
+                st.error("Error al generar descargable final. Revisa los logs del servidor.")
 
     batch_output = st.session_state.get("batch_mark_output")
     if batch_output:
@@ -590,19 +634,19 @@ if run_btn:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
                 tmp = Path(tmp_dir)
 
-                jde_path = tmp / jde_file.name
+                jde_path = tmp / _safe_uploaded_name(jde_file.name, "jde_input.xlsx")
                 jde_path.write_bytes(jde_file.getvalue())
 
                 bank_paths = []
-                for bf in bank_files:
-                    bp = tmp / bf.name
+                for idx, bf in enumerate(bank_files):
+                    bp = tmp / _safe_uploaded_name(bf.name, f"bank_{idx + 1}.xlsx")
                     bp.write_bytes(bf.getvalue())
                     bank_paths.append(str(bp))
 
                 # Reporte Caja: se pasa junto a los bancarios;
                 # el pipeline lo separa internamente por su etiqueta REPORTE_CAJA
-                for rc in (reporte_caja_files or []):
-                    rp = tmp / rc.name
+                for idx, rc in enumerate((reporte_caja_files or [])):
+                    rp = tmp / _safe_uploaded_name(rc.name, f"reporte_caja_{idx + 1}.xlsx")
                     rp.write_bytes(rc.getvalue())
                     bank_paths.append(str(rp))
 
@@ -638,7 +682,7 @@ if run_btn:
                 st.session_state["phase"] = "validating"
 
         except Exception as exc:
-            st.session_state["error"] = str(exc)
+            st.session_state["error"] = "Ocurrio un error interno en la conciliacion."
             logger.exception("Error en stage 1: %s", exc)
 
     st.rerun()
@@ -648,7 +692,7 @@ if run_btn:
 # ════════════════════════════════════════════════════════════
 
 if st.session_state.get("error"):
-    st.error(f"❌ Error durante la conciliación:\n\n{st.session_state['error']}")
+    st.error(f"❌ {st.session_state['error']} Revisa los logs del servidor.")
     st.stop()
 
 # ════════════════════════════════════════════════════════════
@@ -863,7 +907,7 @@ if st.session_state.get("phase") == "validating":
                 st.session_state["error"]   = None
                 st.rerun()
             except Exception as exc:
-                st.session_state["error"] = str(exc)
+                st.session_state["error"] = "Ocurrio un error interno en la conciliacion."
                 logger.exception("Error en stage 2: %s", exc)
                 st.rerun()
 
@@ -942,6 +986,11 @@ pending_jde_diag = _add_unmatched_reason_column(
     date_tolerance_days=diag_date_tol,
     side="JDE",
 )
+
+# Mantener el Excel descargable alineado con la vista de diagnóstico
+# (solo se agrega columna extra para Pendientes Banco).
+results = _refresh_excel_with_pending_bank_reason(results, pending_bank_diag)
+st.session_state["results"] = results
 
 with st.expander("🧭 Explicación de por qué no concilió", expanded=False):
     col_rb, col_rj = st.columns(2)
@@ -1217,7 +1266,8 @@ with tab_historicos:
             try:
                 hist_df = parse_conciliacion_excel(concil_ant_file.getvalue())
             except Exception as exc:
-                st.error(f"❌ Error al leer la conciliación anterior: {exc}")
+                logger.exception("Error al leer la conciliacion anterior: %s", exc)
+                st.error("❌ No se pudo leer la conciliacion anterior. Verifica el archivo y revisa logs.")
                 st.stop()
 
         if hist_df.empty:

@@ -54,7 +54,7 @@ Solicitud sugerida:
   con 8 GB RAM recomendados, minimo 4 GB, y al menos 10 GB libres para Bank Reconciliation App
   (mas espacio adicional para historicos y respaldos).
 - Red corporativa con IP fija, acceso por VPN/LAN y apertura de puertos autorizados en firewall/antivirus.
-- Instalacion de MariaDB para el sistema que lo requiere y separacion de puertos/servicios entre ambas aplicaciones.
+- Separacion de puertos/servicios entre ambas aplicaciones.
 - Politica de disponibilidad permanente, monitoreo y respaldos.
 
 Guia de implementacion recomendada para Windows compartido:
@@ -78,8 +78,9 @@ cd C:\apps
 git clone https://github.com/DiegoEscobedo/bank-reconciliation-app.git
 cd .\bank-reconciliation-app
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+py -3.11 -m venv .venv_clean
+.\.venv_clean\Scripts\python.exe -m pip install --upgrade pip
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## 8. Puerto y reglas de firewall
@@ -90,8 +91,10 @@ Separar puertos para evitar conflicto con el otro sistema.
 - Puerto del otro sistema: mantener el asignado por su equipo (ejemplo 2236).
 
 ```powershell
-New-NetFirewallRule -DisplayName "BankReconciliation-8501" -Direction Inbound -Protocol TCP -LocalPort 8501 -Action Allow
+New-NetFirewallRule -DisplayName "BankReconciliation-8501" -Direction Inbound -Protocol TCP -LocalPort 8501 -RemoteAddress 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 -Action Allow
 ```
+
+Nota: ajustar `-RemoteAddress` a los rangos reales autorizados (LAN/VPN corporativa).
 
 ## 9. Registro como servicio de Windows
 
@@ -102,7 +105,7 @@ Se recomienda NSSM para ejecutar Streamlit como servicio.
 3. Configurar el servicio para correr con cuenta dedicada de bajo privilegio
   (ejemplo: `svc_bankrec`), no con administrador local.
 
-- Path: C:\apps\bank-reconciliation-app\.venv\Scripts\python.exe
+- Path: C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe
 - Startup directory: C:\apps\bank-reconciliation-app
 - Arguments: -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 - Service name sugerido: BankReconciliationApp
@@ -110,16 +113,16 @@ Se recomienda NSSM para ejecutar Streamlit como servicio.
 Comandos ejemplo:
 
 ```powershell
-nssm install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+nssm install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
 nssm set BankReconciliationApp AppDirectory "C:\apps\bank-reconciliation-app"
 nssm start BankReconciliationApp
 ```
 
-Configuracion de cuenta de servicio (ejemplo):
+Configuracion de cuenta de servicio (recomendado):
 
-```powershell
-nssm set BankReconciliationApp ObjectName ".\svc_bankrec" "TU_PASSWORD"
-```
+- No dejar contrasenas en comandos, scripts ni capturas.
+- Configurar la cuenta del servicio desde `services.msc` (pestana **Log On**) o desde canal seguro autorizado por infraestructura.
+- Rotar contrasena periodicamente y registrar evidencia de cambio.
 
 Detalle completo de pasos y permisos:
 
@@ -143,7 +146,7 @@ Detalle completo de pasos y permisos:
 ```powershell
 cd C:\apps\bank-reconciliation-app
 git pull origin main
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
 Restart-Service BankReconciliationApp
 ```
 
