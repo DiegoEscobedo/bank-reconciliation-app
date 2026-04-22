@@ -963,7 +963,7 @@ with st.expander("🔎 Panel de calidad de datos", expanded=False):
         "Lado", "Total", "Cuenta faltante", "Descripción vacía", "Fecha inválida",
         "Tipo vacío", "Tienda vacía", "Duplicados clave",
     ]
-    st.dataframe(qdf, use_container_width=True, hide_index=True)
+    st.dataframe(qdf, width="stretch", hide_index=True)
     st.caption(
         "Duplicados clave = mismos valores en cuenta + fecha + monto abs + tipo de movimiento."
     )
@@ -1001,7 +1001,7 @@ with st.expander("🧭 Explicación de por qué no concilió", expanded=False):
         else:
             c = pending_bank_diag["no_match_reason"].value_counts().reset_index()
             c.columns = ["Motivo", "Casos"]
-            st.dataframe(c, use_container_width=True, hide_index=True)
+            st.dataframe(c, width="stretch", hide_index=True)
     with col_rj:
         st.markdown("**Pendientes JDE — causas**")
         if pending_jde_diag.empty or "no_match_reason" not in pending_jde_diag.columns:
@@ -1009,7 +1009,7 @@ with st.expander("🧭 Explicación de por qué no concilió", expanded=False):
         else:
             c = pending_jde_diag["no_match_reason"].value_counts().reset_index()
             c.columns = ["Motivo", "Casos"]
-            st.dataframe(c, use_container_width=True, hide_index=True)
+            st.dataframe(c, width="stretch", hide_index=True)
 
 st.caption(
     f"Diagnóstico con tolerancias activas: monto +/- ${diag_amount_tol:,.2f} | fecha +/- {diag_date_tol} día(s)."
