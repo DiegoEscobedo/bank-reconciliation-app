@@ -34,3 +34,8 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Validation artifacts
+tests/clean_install_validation.txt
+tests/venv_clean_pytest.txt
+tests/venv_clean_pytest_final.txt
