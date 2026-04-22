@@ -56,11 +56,13 @@ Evidencia sugerida:
 ## 6. Dependencias y parchado
 
 - [ ] Dependencias con versiones controladas (pinning o lockfile).
+- [ ] `requirements.txt` sincronizado desde entorno validado y aplicado en `.venv_clean` de produccion.
 - [ ] Escaneo de vulnerabilidades ejecutado antes de liberar.
 - [ ] Plan de actualizacion de parches definido (mensual/trimestral).
 
 Evidencia sugerida:
 - Reporte de escaneo (`pip-audit` u herramienta corporativa).
+- Evidencia de integridad (`pip check`) en el entorno productivo.
 - Documento de ventana de mantenimiento.
 
 ## 7. Respaldo y recuperacion

@@ -184,7 +184,8 @@ Restart-Service BankReconciliationApp
 Set-Location C:\apps\bank-reconciliation-app
 
 git pull origin main
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv_clean\Scripts\python.exe -m pip check
 Restart-Service BankReconciliationApp
 ```
 

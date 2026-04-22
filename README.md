@@ -59,6 +59,7 @@ py -3.11 -m venv .venv_clean
 ## Seguridad de dependencias
 
 - Las dependencias en `requirements.txt` estan fijadas con version exacta para builds reproducibles.
+- El `requirements.txt` actual fue regenerado desde el entorno funcional `.venv` y se usa para recrear `.venv_clean` en produccion.
 - Se recomienda validar vulnerabilidades localmente antes de publicar cambios.
 
 Comando local sugerido:
@@ -66,6 +67,12 @@ Comando local sugerido:
 ```bash
 pip install pip-audit
 pip-audit -r requirements.txt --strict
+```
+
+Validacion adicional recomendada en el entorno productivo:
+
+```powershell
+.\.venv_clean\Scripts\python.exe -m pip check
 ```
 
 ## Estructura principal

@@ -147,6 +147,7 @@ Detalle completo de pasos y permisos:
 cd C:\apps\bank-reconciliation-app
 git pull origin main
 .\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv_clean\Scripts\python.exe -m pip check
 Restart-Service BankReconciliationApp
 ```
 
