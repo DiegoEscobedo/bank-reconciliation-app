@@ -25,13 +25,41 @@ New-Item -ItemType Directory -Path "$APP\.streamlit" -Force | Out-Null
 @"
 [browser]
 gatherUsageStats = false
+[server]
+headless = true
 "@ | Set-Content -Encoding ASCII "$APP\.streamlit\config.toml"
+
+@"
+[general]
+email = ""
+"@ | Set-Content -Encoding ASCII "$APP\.streamlit\credentials.toml"
+
+$serviceProfiles = @(
+    "C:\Windows\System32\config\systemprofile\.streamlit",
+    "C:\Windows\ServiceProfiles\LocalService\.streamlit",
+    "C:\Windows\ServiceProfiles\NetworkService\.streamlit"
+)
+
+foreach ($profilePath in $serviceProfiles) {
+    New-Item -ItemType Directory -Path $profilePath -Force | Out-Null
+    @"
+[browser]
+gatherUsageStats = false
+[server]
+headless = true
+"@ | Set-Content -Encoding ASCII (Join-Path $profilePath "config.toml")
+    @"
+[general]
+email = ""
+"@ | Set-Content -Encoding ASCII (Join-Path $profilePath "credentials.toml")
+}
 
 @"
 @echo off
 set STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+set STREAMLIT_SERVER_HEADLESS=true
 cd /d C:\apps\bank-reconciliation-app
-C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
 "@ | Set-Content -Encoding ASCII $BAT
 
 Write-Host "[4/9] Preparing logs..."
@@ -50,6 +78,8 @@ Write-Host "[6/9] Installing service via BAT..."
 & $N set $S Start SERVICE_AUTO_START
 & $N set $S AppStdout "$APP\logs\service_out.log"
 & $N set $S AppStderr "$APP\logs\service_err.log"
+$envExtra = "STREAMLIT_BROWSER_GATHER_USAGE_STATS=false`nSTREAMLIT_SERVER_HEADLESS=true"
+& $N set $S AppEnvironmentExtra $envExtra
 
 Write-Host "[7/9] Starting service..."
 & $N start $S
