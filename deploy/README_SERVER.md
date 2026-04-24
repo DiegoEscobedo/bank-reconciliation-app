@@ -66,18 +66,19 @@ Guia de implementacion recomendada para Windows compartido:
 Operacion ajustada para servidor compartido en Windows.
 
 ```powershell
-winget install --id Git.Git -e
-winget install --id Python.Python.3.11 -e
+choco install git -y
+choco install python311 -y
 ```
 
 ## 7. Directorio de aplicacion y entorno
+
+El entorno operativo documentado para despliegue es `.venv_clean`.
 
 ```powershell
 New-Item -ItemType Directory -Path C:\apps\bank-reconciliation-app -Force
 cd C:\apps
 git clone https://github.com/DiegoEscobedo/bank-reconciliation-app.git
 cd .\bank-reconciliation-app
-py -3.11 -m venv .venv
 py -3.11 -m venv .venv_clean
 .\.venv_clean\Scripts\python.exe -m pip install --upgrade pip
 .\.venv_clean\Scripts\python.exe -m pip install -r requirements.txt

@@ -28,6 +28,8 @@ Dejar la aplicacion ejecutandose como servicio para que:
 
 ## 4. Instalacion base de aplicacion
 
+El despliegue y la ejecucion del servicio usan exclusivamente `.venv_clean`.
+
 Ejecutar en PowerShell con permisos de administrador:
 
 ```powershell
