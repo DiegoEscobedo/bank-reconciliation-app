@@ -102,19 +102,27 @@ Nota: ajustar `-RemoteAddress` a los rangos reales autorizados (LAN/VPN corporat
 Se recomienda NSSM para ejecutar Streamlit como servicio.
 
 1. Instalar NSSM (Non-Sucking Service Manager).
-2. Crear servicio con los siguientes parametros:
+2. Crear `start_service.bat` y registrar NSSM para ejecutar ese script.
 3. Configurar el servicio para correr con cuenta dedicada de bajo privilegio
   (ejemplo: `svc_bankrec`), no con administrador local.
 
-- Path: C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe
+- Path: C:\Windows\System32\cmd.exe
 - Startup directory: C:\apps\bank-reconciliation-app
-- Arguments: -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+- Arguments: /c C:\apps\bank-reconciliation-app\start_service.bat
 - Service name sugerido: BankReconciliationApp
 
 Comandos ejemplo:
 
 ```powershell
-nssm install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+@"
+@echo off
+set APP_DIR=C:\apps\bank-reconciliation-app
+set PY=%APP_DIR%\.venv_clean\Scripts\python.exe
+cd /d %APP_DIR%
+"%PY%" -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false
+"@ | Set-Content -Encoding ASCII C:\apps\bank-reconciliation-app\start_service.bat
+
+nssm install BankReconciliationApp C:\Windows\System32\cmd.exe "/c C:\apps\bank-reconciliation-app\start_service.bat"
 nssm set BankReconciliationApp AppDirectory "C:\apps\bank-reconciliation-app"
 nssm start BankReconciliationApp
 ```

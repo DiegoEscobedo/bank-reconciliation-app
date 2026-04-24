@@ -99,25 +99,39 @@ C:\tools\nssm\nssm.exe version
 
 ## 7. Registro del servicio
 
-### 7.1 Crear servicio
+### 7.1 Crear script de arranque (start_service.bat)
+
+Crear el archivo `C:\apps\bank-reconciliation-app\start_service.bat`:
 
 ```powershell
-C:\tools\nssm\nssm.exe install BankReconciliationApp "C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe" "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+@"
+@echo off
+set APP_DIR=C:\apps\bank-reconciliation-app
+set PY=%APP_DIR%\.venv_clean\Scripts\python.exe
+cd /d %APP_DIR%
+"%PY%" -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false
+"@ | Set-Content -Encoding ASCII C:\apps\bank-reconciliation-app\start_service.bat
 ```
 
-### 7.2 Configurar directorio de trabajo
+### 7.2 Crear servicio (NSSM ejecuta BAT)
+
+```powershell
+C:\tools\nssm\nssm.exe install BankReconciliationApp C:\Windows\System32\cmd.exe "/c C:\apps\bank-reconciliation-app\start_service.bat"
+```
+
+### 7.3 Configurar directorio de trabajo
 
 ```powershell
 C:\tools\nssm\nssm.exe set BankReconciliationApp AppDirectory "C:\apps\bank-reconciliation-app"
 ```
 
-### 7.3 Configurar inicio automatico
+### 7.4 Configurar inicio automatico
 
 ```powershell
 C:\tools\nssm\nssm.exe set BankReconciliationApp Start SERVICE_AUTO_START
 ```
 
-### 7.4 Configurar cuenta de servicio en NSSM
+### 7.5 Configurar cuenta de servicio en NSSM
 
 Registrar el servicio para que corra con la cuenta dedicada (no administrador local).
 
@@ -227,30 +241,35 @@ usar este bloque en PowerShell como administrador para recrear la configuracion 
 $N   = "C:\tools\nssm\nssm.exe"
 $S   = "BankReconciliationApp"
 $APP = "C:\apps\bank-reconciliation-app"
-$PY  = "$APP\.venv_clean\Scripts\python.exe"
+$BAT = "$APP\start_service.bat"
 
 # 2) Validaciones rapidas
 if (!(Test-Path $N))  { throw "No existe NSSM en: $N" }
-if (!(Test-Path $PY)) { throw "No existe Python del venv_clean en: $PY" }
 
-# 3) Preparar carpeta de logs
+# 3) Crear/actualizar start_service.bat
+@"
+@echo off
+set APP_DIR=C:\apps\bank-reconciliation-app
+set PY=%APP_DIR%\.venv_clean\Scripts\python.exe
+cd /d %APP_DIR%
+"%PY%" -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false
+"@ | Set-Content -Encoding ASCII $BAT
+
+# 4) Preparar carpeta de logs
 New-Item -ItemType Directory -Path "$APP\logs" -Force | Out-Null
 
-# 4) Detener y eliminar servicio anterior (si existe)
+# 5) Detener y eliminar servicio anterior (si existe)
 & $N stop $S 2>$null
 & $N remove $S confirm 2>$null
 
-# 5) Crear servicio correcto
-& $N install $S $PY "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+# 6) Crear servicio correcto (via BAT)
+& $N install $S "C:\Windows\System32\cmd.exe" "/c $BAT"
 
-# 6) Configuracion del servicio
+# 7) Configuracion del servicio
 & $N set $S AppDirectory $APP
 & $N set $S Start SERVICE_AUTO_START
 & $N set $S AppStdout "$APP\logs\service_out.log"
 & $N set $S AppStderr "$APP\logs\service_err.log"
-
-# 7) Evitar prompt de email/usage stats de Streamlit
-setx STREAMLIT_BROWSER_GATHER_USAGE_STATS false /M
 
 # 8) Iniciar servicio
 & $N start $S
