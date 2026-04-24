@@ -13,17 +13,25 @@ Write-Host "[1/9] Validating paths..."
 if (!(Test-Path $N)) { throw "NSSM not found at: $N" }
 if (!(Test-Path $APP)) { throw "App folder not found at: $APP" }
 
+$PY = "$APP\.venv_clean\Scripts\python.exe"
+if (!(Test-Path $PY)) { throw "Python from venv_clean not found at: $PY" }
+
 Write-Host "[2/9] Updating repository..."
 Set-Location $APP
 git pull origin main
 
 Write-Host "[3/9] Creating/updating start_service.bat..."
+New-Item -ItemType Directory -Path "$APP\.streamlit" -Force | Out-Null
+@"
+[browser]
+gatherUsageStats = false
+"@ | Set-Content -Encoding ASCII "$APP\.streamlit\config.toml"
+
 @"
 @echo off
-set APP_DIR=C:\apps\bank-reconciliation-app
-set PY=%APP_DIR%\.venv_clean\Scripts\python.exe
-cd /d %APP_DIR%
-"%PY%" -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false
+set STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+cd /d C:\apps\bank-reconciliation-app
+C:\apps\bank-reconciliation-app\.venv_clean\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 "@ | Set-Content -Encoding ASCII $BAT
 
 Write-Host "[4/9] Preparing logs..."
