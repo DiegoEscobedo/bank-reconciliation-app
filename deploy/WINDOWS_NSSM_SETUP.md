@@ -217,6 +217,53 @@ Set-Location C:\apps\bank-reconciliation-app
 Restart-Service BankReconciliationApp
 ```
 
+### Recuperacion rapida de configuracion NSSM
+
+Si el servicio presenta errores de ruta/comando (por ejemplo, ejecucion de `python` incorrecta),
+usar este bloque en PowerShell como administrador para recrear la configuracion limpia:
+
+```powershell
+# 1) Variables
+$N   = "C:\tools\nssm\nssm.exe"
+$S   = "BankReconciliationApp"
+$APP = "C:\apps\bank-reconciliation-app"
+$PY  = "$APP\.venv_clean\Scripts\python.exe"
+
+# 2) Validaciones rapidas
+if (!(Test-Path $N))  { throw "No existe NSSM en: $N" }
+if (!(Test-Path $PY)) { throw "No existe Python del venv_clean en: $PY" }
+
+# 3) Preparar carpeta de logs
+New-Item -ItemType Directory -Path "$APP\logs" -Force | Out-Null
+
+# 4) Detener y eliminar servicio anterior (si existe)
+& $N stop $S 2>$null
+& $N remove $S confirm 2>$null
+
+# 5) Crear servicio correcto
+& $N install $S $PY "-m streamlit run app.py --server.port 8501 --server.address 0.0.0.0"
+
+# 6) Configuracion del servicio
+& $N set $S AppDirectory $APP
+& $N set $S Start SERVICE_AUTO_START
+& $N set $S AppStdout "$APP\logs\service_out.log"
+& $N set $S AppStderr "$APP\logs\service_err.log"
+
+# 7) Evitar prompt de email/usage stats de Streamlit
+setx STREAMLIT_BROWSER_GATHER_USAGE_STATS false /M
+
+# 8) Iniciar servicio
+& $N start $S
+
+# 9) Validar estado y puerto
+Get-Service $S
+Get-NetTCPConnection -LocalPort 8501 -State Listen
+
+# 10) Ver logs (ultimas lineas)
+Get-Content "$APP\logs\service_err.log" -Tail 80
+Get-Content "$APP\logs\service_out.log" -Tail 80
+```
+
 ## 14. Checklist de cierre
 
 - Servicio creado y en `Running`.
