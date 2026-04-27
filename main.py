@@ -535,6 +535,97 @@ def _prepare_dataframes(bank_file_path, jde_file_path):
     return bank_df, jde_df, mp_color_filter_debug
 
 
+def _build_precheck_report(bank_df, jde_df) -> dict:
+    """
+    Construye un reporte de calidad previo a la conciliación.
+    ``ok`` solo es True si no hay problemas bloqueantes.
+    """
+    required = set(DataFrameSchemaValidator.REQUIRED_COLUMNS)
+
+    def _source_report(df, source_name: str) -> dict:
+        blocking_issues: list[str] = []
+        warnings: list[str] = []
+        metrics: dict[str, int] = {"rows": int(len(df))}
+
+        if df.empty:
+            blocking_issues.append(f"[{source_name}] No hay movimientos para conciliar.")
+            return {
+                "blocking_issues": blocking_issues,
+                "warnings": warnings,
+                "metrics": metrics,
+            }
+
+        missing_cols = sorted(required - set(df.columns))
+        if missing_cols:
+            blocking_issues.append(
+                f"[{source_name}] Faltan columnas obligatorias: {', '.join(missing_cols)}"
+            )
+
+        empty_account = int(df["account_id"].fillna("").astype(str).str.strip().eq("").sum()) if "account_id" in df.columns else 0
+        null_date = int(df["movement_date"].isna().sum()) if "movement_date" in df.columns else 0
+        non_positive_amount = int((df["abs_amount"] <= 0).sum()) if "abs_amount" in df.columns else 0
+        empty_description = int(df["description"].fillna("").astype(str).str.strip().eq("").sum()) if "description" in df.columns else 0
+
+        metrics.update(
+            {
+                "account_id_vacio": empty_account,
+                "movement_date_nula": null_date,
+                "abs_amount_no_positivo": non_positive_amount,
+                "description_vacia": empty_description,
+            }
+        )
+
+        if empty_account > 0:
+            warnings.append(f"[{source_name}] {empty_account} fila(s) sin account_id.")
+        if null_date > 0:
+            warnings.append(f"[{source_name}] {null_date} fila(s) con movement_date nula/inválida.")
+        if non_positive_amount > 0:
+            warnings.append(f"[{source_name}] {non_positive_amount} fila(s) con abs_amount <= 0.")
+        if empty_description > 0:
+            warnings.append(f"[{source_name}] {empty_description} fila(s) con descripción vacía.")
+
+        if "movement_type" in df.columns:
+            allowed_types = {"DEP", "WDR", "COM"}
+            mt = df["movement_type"].fillna("").astype(str).str.strip().str.upper()
+            unexpected = int((~mt.isin(allowed_types)).sum())
+            metrics["movement_type_fuera_catalogo"] = unexpected
+            if unexpected > 0:
+                warnings.append(
+                    f"[{source_name}] {unexpected} fila(s) con movement_type fuera de catálogo (DEP/WDR/COM)."
+                )
+
+        return {
+            "blocking_issues": blocking_issues,
+            "warnings": warnings,
+            "metrics": metrics,
+        }
+
+    bank_report = _source_report(bank_df, "BANK")
+    jde_report = _source_report(jde_df, "JDE")
+
+    blocking_issues = bank_report["blocking_issues"] + jde_report["blocking_issues"]
+    warnings = bank_report["warnings"] + jde_report["warnings"]
+
+    return {
+        "ok": len(blocking_issues) == 0,
+        "issues": blocking_issues,
+        "warnings": warnings,
+        "metrics": {
+            "bank": bank_report["metrics"],
+            "jde": jde_report["metrics"],
+        },
+    }
+
+
+def run_pipeline_precheck(bank_file_path, jde_file_path) -> dict:
+    """
+    Ejecuta preparación + validación previa para detectar errores bloqueantes
+    y advertencias de calidad antes del matching.
+    """
+    bank_df, jde_df, _ = _prepare_dataframes(bank_file_path, jde_file_path)
+    return _build_precheck_report(bank_df, jde_df)
+
+
 # ============================================================
 # PIPELINE PRINCIPAL (importable desde Streamlit / CLI)
 # ============================================================

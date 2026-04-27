@@ -19,12 +19,13 @@ from config.settings import (
     DATE_TOLERANCE_DAYS,
     TIPO_BANCO_TO_JDE_COMPAT,
 )
-from main import run_pipeline, run_pipeline_stage1, run_pipeline_stage2
+from main import run_pipeline, run_pipeline_precheck, run_pipeline_stage1, run_pipeline_stage2
 from src.reporting.excel_reporter import ExcelReporter
 from src.batch.batch_marking import extract_batch_preview, parse_batch_input
 from src.utils.logger import get_logger
 from src.parsers.conciliacion_parser import parse_conciliacion_excel, get_pending_summary
 from src.matching.historical_matcher import match_historical_pendientes, summarize_historical_matches
+from src.validacion.schema_validator import SchemaValidationError
 
 logger = get_logger(__name__)
 
@@ -650,16 +651,34 @@ if run_btn:
                     rp.write_bytes(rc.getvalue())
                     bank_paths.append(str(rp))
 
-                stage1_data = run_pipeline_stage1(
+                precheck = run_pipeline_precheck(
                     bank_file_path=bank_paths,
                     jde_file_path=str(jde_path),
-                    amount_tolerance=float(amount_tolerance_ui),
-                    date_tolerance_days=int(date_tolerance_ui),
                 )
+                st.session_state["precheck_report"] = precheck
+
+                if not precheck.get("ok", False):
+                    issues = precheck.get("issues", [])
+                    issues_text = "\n".join([f"- {msg}" for msg in issues])
+                    st.session_state["error"] = (
+                        "Validación previa fallida. Corrige los archivos antes de conciliar:\n"
+                        f"{issues_text}"
+                    )
+                    st.session_state["phase"] = "idle"
+                else:
+                    stage1_data = run_pipeline_stage1(
+                        bank_file_path=bank_paths,
+                        jde_file_path=str(jde_path),
+                        amount_tolerance=float(amount_tolerance_ui),
+                        date_tolerance_days=int(date_tolerance_ui),
+                    )
                 # Guardar los bytes del Papel de Trabajo DENTRO del with,
                 # antes de que el TemporaryDirectory sea destruido.
-                if stage1_data.get("_is_papel_trabajo"):
-                    stage1_data["_jde_bytes"] = jde_file.getvalue()
+                    if stage1_data.get("_is_papel_trabajo"):
+                        stage1_data["_jde_bytes"] = jde_file.getvalue()
+
+            if st.session_state.get("error"):
+                st.rerun()
 
             st.session_state["stage1_data"] = stage1_data
 
@@ -681,8 +700,11 @@ if run_btn:
             else:
                 st.session_state["phase"] = "validating"
 
+        except SchemaValidationError as exc:
+            st.session_state["error"] = f"Error de validación de estructura: {exc}"
+            logger.exception("Error de validación en stage 1: %s", exc)
         except Exception as exc:
-            st.session_state["error"] = "Ocurrio un error interno en la conciliacion."
+            st.session_state["error"] = "Ocurrió un error interno en la conciliación."
             logger.exception("Error en stage 1: %s", exc)
 
     st.rerun()
@@ -694,6 +716,13 @@ if run_btn:
 if st.session_state.get("error"):
     st.error(f"❌ {st.session_state['error']} Revisa los logs del servidor.")
     st.stop()
+
+precheck_report = st.session_state.get("precheck_report")
+if precheck_report and precheck_report.get("warnings"):
+    st.warning(
+        "Validación previa completada con advertencias:\n"
+        + "\n".join([f"- {msg}" for msg in precheck_report["warnings"]])
+    )
 
 # ════════════════════════════════════════════════════════════
 # FASE 2 — VALIDACIÓN DE AGRUPACIONES
