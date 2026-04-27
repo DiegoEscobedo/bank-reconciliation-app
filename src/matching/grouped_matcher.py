@@ -90,6 +90,21 @@ class GroupedMatcher:
 		commission_codes = {cls._normalize_code(code) for code in COMMISSION_CODES_6614}
 		return "COMISION" in desc or mvtype == "COM" or code in commission_codes
 
+	@classmethod
+	def _is_cash_deposit_bank_row(cls, row) -> bool:
+		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
+		if mvtype in {"DEP", "DEPOSITO", "DEPOSIT"}:
+			return True
+		return "EFECTIVO" in desc or "DEPOSITO" in desc
+
+	def _candidate_limit_for_bank_row(self, bank_row) -> int:
+		"""Aumenta candidatos solo para depósitos en efectivo."""
+		base_limit = int(self.engine.grouped_candidate_limit)
+		if not self._is_cash_deposit_bank_row(bank_row):
+			return base_limit
+		return min(max(base_limit * 2, base_limit), 60)
+
 	def _get_6614_commission_candidates(self, available_bank: "pd.DataFrame", jde_row) -> "pd.DataFrame":
 		"""
 		Sesgo opcional para comisiones Banorte:
@@ -180,6 +195,11 @@ class GroupedMatcher:
 		if bank_tienda:
 			return candidates[jde_tienda == bank_tienda].copy()
 
+		# Depósitos en efectivo sin tienda bancaria explícita:
+		# no restringir a JDE sin tienda para evitar perder agrupaciones válidas.
+		if self._is_cash_deposit_bank_row(bank_row):
+			return candidates
+
 		return candidates[jde_tienda.isin(["", "NO ENCONTRADO"])].copy()
 
 	def _enforce_strict_tipo_pago(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
@@ -207,6 +227,11 @@ class GroupedMatcher:
 				return candidates[jde_tipo.isin(compatible)].copy()
 			# Si no existe mapeo explícito, exigir igualdad textual.
 			return candidates[jde_tipo == bank_tipo].copy()
+
+		# Depósitos en efectivo sin tipo bancario explícito:
+		# permitir tipo JDE 01 (efectivo) además de vacío.
+		if self._is_cash_deposit_bank_row(bank_row):
+			return candidates[jde_tipo.isin(["01", "", "NO ENCONTRADO", "NAN", "NONE", "<NA>"])].copy()
 
 		return candidates[jde_tipo.isin(["", "NO ENCONTRADO", "NAN", "NONE", "<NA>"])].copy()
 
@@ -280,7 +305,12 @@ class GroupedMatcher:
 			if filtered.empty:
 				continue
 
-			subset_result = self.try_subsets_per_tienda(filtered, target_amount)
+			candidate_limit = self._candidate_limit_for_bank_row(bank_row)
+			subset_result = self.try_subsets_per_tienda(
+				filtered,
+				target_amount,
+				candidate_limit=candidate_limit,
+			)
 
 			min_group_size = getattr(self.engine, "forward_grouped_min_size", 1)
 			if not subset_result or len(subset_result) < min_group_size:
@@ -364,8 +394,11 @@ class GroupedMatcher:
 				if alt_filtered.empty:
 					continue
 
+				candidate_limit = self._candidate_limit_for_bank_row(bank_row)
 				alt_result = self.try_subsets_per_tienda(
-					alt_filtered, target_amount
+					alt_filtered,
+					target_amount,
+					candidate_limit=candidate_limit,
 				)
 
 				min_group_size = getattr(self.engine, "forward_grouped_min_size", 1)
@@ -398,6 +431,7 @@ class GroupedMatcher:
 		self,
 		filtered_candidates: "pd.DataFrame",
 		target_amount: float,
+		candidate_limit: int | None = None,
 	) -> "list | None":
 		"""
 		Intenta encontrar el mejor subset sum garantizando que todos los
@@ -416,9 +450,10 @@ class GroupedMatcher:
 
 		if not has_tienda:
 			# Sin info de tienda -> comportamiento original
+			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
 			candidate_rows = list(
 				filtered_candidates.nsmallest(
-					self.engine.grouped_candidate_limit,
+					limit,
 					"abs_amount",
 				).iterrows()
 			)
@@ -435,9 +470,10 @@ class GroupedMatcher:
 
 		if len(tiendas) <= 1:
 			# Una sola tienda -> sin riesgo de mezcla, camino directo
+			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
 			candidate_rows = list(
 				filtered_candidates.nsmallest(
-					self.engine.grouped_candidate_limit,
+					limit,
 					"abs_amount",
 				).iterrows()
 			)
@@ -451,9 +487,10 @@ class GroupedMatcher:
 			grupo = filtered_candidates[
 				filtered_candidates["tienda"].str.strip() == tienda
 			]
+			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
 			candidate_rows = list(
 				grupo.nsmallest(
-					self.engine.grouped_candidate_limit,
+					limit,
 					"abs_amount",
 				).iterrows()
 			)
