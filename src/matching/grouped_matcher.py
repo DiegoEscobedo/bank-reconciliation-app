@@ -30,6 +30,30 @@ class GroupedMatcher:
 		return str(value).strip().upper()
 
 	@staticmethod
+	def _normalize_movement_type(value) -> str:
+		if pd.isna(value):
+			return ""
+		return str(value).strip().upper()
+
+	@staticmethod
+	def _normalize_poliza(value) -> int | None:
+		if pd.isna(value):
+			return None
+		text = str(value).strip()
+		if not text:
+			return None
+		try:
+			return int(float(text))
+		except (TypeError, ValueError):
+			digits = "".join(ch for ch in text if ch.isdigit())
+			if not digits:
+				return None
+			try:
+				return int(digits)
+			except (TypeError, ValueError):
+				return None
+
+	@staticmethod
 	def _normalize_text(value) -> str:
 		if pd.isna(value):
 			return ""
@@ -90,20 +114,28 @@ class GroupedMatcher:
 		commission_codes = {cls._normalize_code(code) for code in COMMISSION_CODES_6614}
 		return "COMISION" in desc or mvtype == "COM" or code in commission_codes
 
-	@classmethod
-	def _is_cash_deposit_bank_row(cls, row) -> bool:
-		desc = cls._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
-		mvtype = cls._normalize_text(row.get("movement_type", "") if hasattr(row, "get") else "")
-		if mvtype in {"DEP", "DEPOSITO", "DEPOSIT"}:
-			return True
-		return "EFECTIVO" in desc or "DEPOSITO" in desc
+	def _select_candidate_rows(
+		self,
+		candidates: "pd.DataFrame",
+		target_amount: float,
+		limit: int,
+	) -> list:
+		"""
+		Mejora de busqueda: combina montos pequeños y cercanos al objetivo para
+		darle al subset-sum un set mas representativo sin relajar filtros.
+		"""
+		if candidates.empty:
+			return []
 
-	def _candidate_limit_for_bank_row(self, bank_row) -> int:
-		"""Aumenta candidatos solo para depósitos en efectivo."""
-		base_limit = int(self.engine.grouped_candidate_limit)
-		if not self._is_cash_deposit_bank_row(bank_row):
-			return base_limit
-		return min(max(base_limit * 2, base_limit), 60)
+		limit = max(1, int(limit))
+		window = candidates.nsmallest(limit, "abs_amount")
+
+		if len(candidates) > limit:
+			gap = (candidates["abs_amount"] - target_amount).abs()
+			near_target = candidates.assign(_gap=gap).nsmallest(limit, "_gap").drop(columns=["_gap"])
+			window = pd.concat([window, near_target]).drop_duplicates()
+
+		return list(window.iterrows())
 
 	def _get_6614_commission_candidates(self, available_bank: "pd.DataFrame", jde_row) -> "pd.DataFrame":
 		"""
@@ -174,6 +206,89 @@ class GroupedMatcher:
 			return candidates[bank_dispersion_mask].copy()
 		return candidates[~bank_dispersion_mask].copy()
 
+	def _enforce_strict_movement_type_forward(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
+		"""
+		Regla estricta de movement_type para agrupaciones forward.
+		"""
+		if "movement_type" not in candidates.columns:
+			return candidates
+
+		bank_mvtype = self._normalize_movement_type(
+			bank_row.get("movement_type") if hasattr(bank_row, "get") else bank_row["movement_type"]
+		)
+		jde_mvtype = candidates["movement_type"].apply(self._normalize_movement_type)
+
+		if bank_mvtype:
+			return candidates[jde_mvtype == bank_mvtype].copy()
+		return candidates[jde_mvtype == ""].copy()
+
+	@staticmethod
+	def _is_cash_deposit_bank_row(row) -> bool:
+		desc = GroupedMatcher._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		mvtype = GroupedMatcher._normalize_movement_type(
+			row.get("movement_type", "") if hasattr(row, "get") else ""
+		)
+		if mvtype in {"DEP", "DEPOSITO", "DEPOSIT"}:
+			return True
+		return "EFECTIVO" in desc or "DEPOSITO" in desc
+
+	@staticmethod
+	def _is_cash_jde_row(row) -> bool:
+		tipo_jde = GroupedMatcher._normalize_movement_type(
+			row.get("tipo_jde", "") if hasattr(row, "get") else ""
+		)
+		desc = GroupedMatcher._normalize_text(row.get("description", "") if hasattr(row, "get") else "")
+		if tipo_jde == "01":
+			return True
+		if any(keyword in desc for keyword in ("EFECTIVO", "DEPOSITO EFECTIVO", "DEP EFECTIVO", "CAJA")):
+			return True
+		return False
+
+	def _find_best_consecutive_poliza_subset(
+		self,
+		candidates: "pd.DataFrame",
+		target_amount: float,
+	) -> "list | None":
+		"""Busca el mejor subgrupo contiguo de pólizas ordenadas ascendentemente."""
+		if candidates.empty or "poliza" not in candidates.columns:
+			return None
+
+		working = candidates.copy()
+		working = working[working.apply(self._is_cash_jde_row, axis=1)].copy()
+		if working.empty:
+			return None
+
+		working["_poliza_norm"] = working["poliza"].apply(self._normalize_poliza)
+		working = working[working["_poliza_norm"].notna()].copy()
+		if working.empty:
+			return None
+
+		working["_source_order"] = range(len(working))
+		working = working.sort_values(["_poliza_norm", "_source_order"], kind="mergesort")
+		ordered_rows = list(working.iterrows())
+
+		best_result = None
+		best_diff = float("inf")
+		best_len = 0
+
+		for start in range(len(ordered_rows)):
+			current_sum = 0.0
+			current_group = []
+			for end in range(start, len(ordered_rows)):
+				row_index, row = ordered_rows[end]
+				current_group.append((row_index, candidates.loc[row_index]))
+				current_sum = round(current_sum + round(row["abs_amount"], self.engine.rounding_decimals), self.engine.rounding_decimals)
+				if current_sum > target_amount + self.engine.amount_tolerance:
+					break
+				diff = abs(target_amount - current_sum)
+				if diff <= self.engine.amount_tolerance:
+					if diff < best_diff or (diff == best_diff and len(current_group) > best_len):
+						best_diff = diff
+						best_len = len(current_group)
+						best_result = list(current_group)
+
+		return best_result
+
 	def _enforce_strict_tienda(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
 		"""
 		Regla estricta de tienda para agrupaciones:
@@ -194,12 +309,6 @@ class GroupedMatcher:
 
 		if bank_tienda:
 			return candidates[jde_tienda == bank_tienda].copy()
-
-		# Depósitos en efectivo sin tienda bancaria explícita:
-		# no restringir a JDE sin tienda para evitar perder agrupaciones válidas.
-		if self._is_cash_deposit_bank_row(bank_row):
-			return candidates
-
 		return candidates[jde_tienda.isin(["", "NO ENCONTRADO"])].copy()
 
 	def _enforce_strict_tipo_pago(self, candidates: "pd.DataFrame", bank_row) -> "pd.DataFrame":
@@ -227,12 +336,6 @@ class GroupedMatcher:
 				return candidates[jde_tipo.isin(compatible)].copy()
 			# Si no existe mapeo explícito, exigir igualdad textual.
 			return candidates[jde_tipo == bank_tipo].copy()
-
-		# Depósitos en efectivo sin tipo bancario explícito:
-		# permitir tipo JDE 01 (efectivo) además de vacío.
-		if self._is_cash_deposit_bank_row(bank_row):
-			return candidates[jde_tipo.isin(["01", "", "NO ENCONTRADO", "NAN", "NONE", "<NA>"])].copy()
-
 		return candidates[jde_tipo.isin(["", "NO ENCONTRADO", "NAN", "NONE", "<NA>"])].copy()
 
 	def propose_grouped_matches(self, bank_dataframe, jde_dataframe):
@@ -285,6 +388,12 @@ class GroupedMatcher:
 			if available_jde.empty:
 				continue
 
+			# Tipo de movimiento estricto para agrupaciones
+			available_jde = self._enforce_strict_movement_type_forward(available_jde, bank_row)
+
+			if available_jde.empty:
+				continue
+
 			# Refinar por comision (simetrico)
 			available_jde = self.engine._filter_by_comision(available_jde, bank_row)
 			# Regla: CARGO POR DISPERSION solo con NOMINA
@@ -305,11 +414,11 @@ class GroupedMatcher:
 			if filtered.empty:
 				continue
 
-			candidate_limit = self._candidate_limit_for_bank_row(bank_row)
 			subset_result = self.try_subsets_per_tienda(
 				filtered,
 				target_amount,
-				candidate_limit=candidate_limit,
+				bank_row=bank_row,
+				candidate_limit=self.engine.grouped_candidate_limit,
 			)
 
 			min_group_size = getattr(self.engine, "forward_grouped_min_size", 1)
@@ -374,6 +483,15 @@ class GroupedMatcher:
 					alt_jde, bank_row, jde_dataframe
 				)
 
+				if alt_jde.empty:
+					continue
+
+				# Tipo de movimiento estricto para agrupaciones
+				alt_jde = self._enforce_strict_movement_type_forward(alt_jde, bank_row)
+
+				if alt_jde.empty:
+					continue
+
 				# Refinar por comision (simetrico)
 				alt_jde = self.engine._filter_by_comision(alt_jde, bank_row)
 				# Regla: CARGO POR DISPERSION solo con NOMINA
@@ -394,11 +512,11 @@ class GroupedMatcher:
 				if alt_filtered.empty:
 					continue
 
-				candidate_limit = self._candidate_limit_for_bank_row(bank_row)
 				alt_result = self.try_subsets_per_tienda(
 					alt_filtered,
 					target_amount,
-					candidate_limit=candidate_limit,
+					bank_row=bank_row,
+					candidate_limit=self.engine.grouped_candidate_limit,
 				)
 
 				min_group_size = getattr(self.engine, "forward_grouped_min_size", 1)
@@ -431,6 +549,7 @@ class GroupedMatcher:
 		self,
 		filtered_candidates: "pd.DataFrame",
 		target_amount: float,
+		bank_row=None,
 		candidate_limit: int | None = None,
 	) -> "list | None":
 		"""
@@ -447,16 +566,15 @@ class GroupedMatcher:
 			and filtered_candidates["tienda"].notna().any()
 			and (filtered_candidates["tienda"].str.strip() != "").any()
 		)
+		cash_mode = bank_row is not None and self._is_cash_deposit_bank_row(bank_row)
 
 		if not has_tienda:
 			# Sin info de tienda -> comportamiento original
 			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
-			candidate_rows = list(
-				filtered_candidates.nsmallest(
-					limit,
-					"abs_amount",
-				).iterrows()
-			)
+			if cash_mode:
+				cash_result = self._find_best_consecutive_poliza_subset(filtered_candidates, target_amount)
+				return cash_result
+			candidate_rows = self._select_candidate_rows(filtered_candidates, target_amount, limit)
 			return self.find_subset_sum_with_limit(candidate_rows, target_amount)
 
 		# Obtener tiendas unicas presentes en los candidatos
@@ -471,12 +589,10 @@ class GroupedMatcher:
 		if len(tiendas) <= 1:
 			# Una sola tienda -> sin riesgo de mezcla, camino directo
 			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
-			candidate_rows = list(
-				filtered_candidates.nsmallest(
-					limit,
-					"abs_amount",
-				).iterrows()
-			)
+			if cash_mode:
+				cash_result = self._find_best_consecutive_poliza_subset(filtered_candidates, target_amount)
+				return cash_result
+			candidate_rows = self._select_candidate_rows(filtered_candidates, target_amount, limit)
 			return self.find_subset_sum_with_limit(candidate_rows, target_amount)
 
 		# Multiples tiendas -> probar cada una y conservar el mejor resultado
@@ -487,13 +603,23 @@ class GroupedMatcher:
 			grupo = filtered_candidates[
 				filtered_candidates["tienda"].str.strip() == tienda
 			]
+			if cash_mode:
+				cash_result = self._find_best_consecutive_poliza_subset(grupo, target_amount)
+				if cash_result is not None:
+					accumulated = round(
+						sum(
+							round(r["abs_amount"], self.engine.rounding_decimals)
+							for _, r in cash_result
+						),
+						self.engine.rounding_decimals,
+					)
+					diff = abs(target_amount - accumulated)
+					if diff < best_diff:
+						best_diff = diff
+						best_result = cash_result
+				continue
 			limit = int(candidate_limit or self.engine.grouped_candidate_limit)
-			candidate_rows = list(
-				grupo.nsmallest(
-					limit,
-					"abs_amount",
-				).iterrows()
-			)
+			candidate_rows = self._select_candidate_rows(grupo, target_amount, limit)
 			result = self.find_subset_sum_with_limit(candidate_rows, target_amount)
 			if result is None:
 				continue
@@ -509,6 +635,9 @@ class GroupedMatcher:
 				best_diff = diff
 				best_result = result
 
+		if cash_mode:
+			return best_result
+
 		return best_result
 
 	def propose_reverse_grouped_matches(
@@ -519,13 +648,8 @@ class GroupedMatcher:
 		start_group_id: int = 10000,
 	) -> list:
 		"""
-		Para cada movimiento JDE pendiente, busca un subconjunto de
-		movimientos bancarios pendientes cuya SUMA iguale el monto JDE
-		(dentro de la tolerancia). Solo aplica cuando se necesitan 2+
-		movimientos bancarios (si fuera 1, el matching exacto ya lo cubriria).
-
-		Caso tipico: varias comisiones bancarias separadas (-10, -5, -1.60, -0.80)
-		que juntas suman la comision registrada en JDE (-17.40).
+		Propone agrupaciones inversas (JDE -> banco) evitando reutilizar
+		movimientos ya reclamados por propuestas forward.
 		"""
 		# Bank rows reclamados por propuestas forward (para evitar doble uso)
 		claimed_bank = {p["bank_row_index"] for p in forward_proposals}
@@ -539,7 +663,7 @@ class GroupedMatcher:
 
 			target_amount = round(jde_row["abs_amount"], self.engine.rounding_decimals)
 			jde_date = jde_row["movement_date"]
-			jde_mvtype = jde_row.get("movement_type", "")
+			jde_mvtype = self._normalize_movement_type(jde_row.get("movement_type", ""))
 			jde_is_commission = self._is_jde_commission_row(jde_row)
 
 			# Candidatos base: pendientes, dentro de fecha y cada uno menor que
@@ -551,19 +675,17 @@ class GroupedMatcher:
 				& (bank_dataframe["abs_amount"] < target_amount - self.engine.amount_tolerance)
 			].copy()
 
-			if jde_is_commission:
-				# En datos reales banco, las comisiones llegan como RETIRO.
-				# Permitir RETIRO/COM y reforzar por descripcion de comision.
-				bank_mvtype = available_bank["movement_type"].fillna("").astype(str).str.strip().str.upper()
-				available_bank = available_bank[bank_mvtype.isin(["RETIRO", "COM", "WDR"])].copy()
-				if not available_bank.empty:
-					commission_mask = available_bank.apply(self._is_bank_commission_row, axis=1)
-					if commission_mask.any():
-						available_bank = available_bank[commission_mask].copy()
-			else:
-				available_bank = available_bank[
-					available_bank["movement_type"] == jde_mvtype
-				].copy()
+			if "movement_type" in available_bank.columns:
+				bank_mvtype = available_bank["movement_type"].apply(self._normalize_movement_type)
+				if jde_mvtype:
+					available_bank = available_bank[bank_mvtype == jde_mvtype].copy()
+				else:
+					available_bank = available_bank[bank_mvtype == ""].copy()
+
+			if jde_is_commission and not available_bank.empty:
+				commission_mask = available_bank.apply(self._is_bank_commission_row, axis=1)
+				if commission_mask.any():
+					available_bank = available_bank[commission_mask].copy()
 
 			if len(available_bank) < 2:
 				continue
@@ -649,11 +771,10 @@ class GroupedMatcher:
 					used_commission_code_bias = True
 
 			if result is None:
-				candidate_rows = list(
-					available_bank.nsmallest(
-						self.engine.grouped_candidate_limit,
-						"abs_amount",
-					).iterrows()
+				candidate_rows = self._select_candidate_rows(
+					available_bank,
+					target_amount,
+					self.engine.grouped_candidate_limit,
 				)
 				result = self.find_subset_sum_with_limit(candidate_rows, target_amount)
 

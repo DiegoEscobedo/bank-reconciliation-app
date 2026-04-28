@@ -22,10 +22,15 @@ from src.utils.date_utils import parse_date_series
 from src.utils.amount_utils import clean_amount_series
 from src.utils.logger import get_logger
 
-# Patrón: "PI 2238 OUG 355382 7133 28"  → tienda=OUG, tipo_jde=28
+# Patrón: "PI 2238 OUG 355382 7133 28"  → poliza=2238, tienda=OUG, tipo_jde=28
 # El lote puede tener espacios ("FAB 357 362"), por eso .*
 _PI_RE = re.compile(
     r'PI\s+\d+\s+(\w+)\s+.*\s\d{3,}\s+(\d{1,2})\s*$',
+    re.IGNORECASE,
+)
+
+_PI_POLIZA_RE = re.compile(
+    r'PI\s+(\d+)',
     re.IGNORECASE,
 )
 
@@ -97,8 +102,13 @@ class JDENormalizer:
         parsed_all = df["description"].apply(self._extract_tienda_tipo)
         parsed_tienda = parsed_all.apply(lambda x: x[0])
         parsed_tipo = parsed_all.apply(lambda x: x[1])
+        parsed_poliza = df["description"].apply(self._extract_poliza_pi)
 
         df["tienda"] = parsed_tienda.values
+
+        if "poliza" not in df.columns:
+            df["poliza"] = None
+        df["poliza"] = pd.to_numeric(parsed_poliza, errors="coerce").astype("Int64")
 
         if "tipo_jde" not in df.columns:
             df["tipo_jde"] = None
@@ -154,6 +164,7 @@ class JDENormalizer:
             "source",
             "tienda",
             "tipo_jde",
+            "poliza",
             "_aux_fact",
             "_excel_row",
             "_pt_file",
@@ -187,12 +198,25 @@ class JDENormalizer:
         return (tienda, tipo_jde)
 
     @staticmethod
+    def _extract_poliza_pi(description: str):
+        """Extrae la póliza que aparece después de PI en la descripción JDE."""
+        if not description:
+            return None
+        m = _PI_POLIZA_RE.search(description)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _empty_schema() -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "account_id", "movement_date", "description",
             "doc_type", "document",
             "amount_signed", "abs_amount", "movement_type", "source",
-            "tienda", "tipo_jde",
+            "tienda", "tipo_jde", "poliza",
             "_aux_fact", "_excel_row", "_pt_file",
         ])
 
