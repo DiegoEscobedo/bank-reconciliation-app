@@ -671,10 +671,12 @@ class ReconciliationEngine:
         self,
         filtered_candidates: "pd.DataFrame",
         target_amount: float,
+        bank_row=None,
     ) -> "list | None":
         return self.grouped_matcher.try_subsets_per_tienda(
             filtered_candidates,
             target_amount,
+            bank_row=bank_row,
         )
 
     # ============================================================
@@ -763,18 +765,20 @@ class ReconciliationEngine:
         # Agrupar por color (ignorar NaN / None / vacío)
         jde_df = jde_dataframe.copy()
         jde_df["cell_color"] = jde_df["cell_color"].fillna("")
-        
-        # Colores a ignorar (vacío)
-        ignored_colors = {"", "FFFFFFFF"}  # Blanco puro
+
+        # Colores a ignorar (solo vacío). A partir de aquí permitimos
+        # agrupar por cualquier color, incluidos blancos y grises.
+        ignored_colors = {""}
         color_groups = {}
         
         for idx, row in jde_df.iterrows():
             color = str(row.get("cell_color", "")).strip().upper()
             
-            # Ignorar si está en lista de excluidos O si es color gris
-            if color in ignored_colors or self._is_gray_color(color):
+            # Ignorar solo si el color está vacío/None. Incluir aquí
+            # blancos/grises como colores válidos para agrupar.
+            if color in ignored_colors:
                 logger.debug(
-                    "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s - IGNORADA (gris o vacío)",
+                    "[COLOR-MATCH FILTER] Fila JDE idx=%d color=%s - IGNORADA (vacío)",
                     idx, color
                 )
                 continue

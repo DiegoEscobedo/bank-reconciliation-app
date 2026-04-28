@@ -112,6 +112,14 @@ class BankNormalizer:
             df["cod_transac"] = df["cod_transac"].fillna("").astype(str).str.strip()
             base_cols.append("cod_transac")
 
+        # Preservar metadata útil para parsers específicos (ej. MercadoPago)
+        # - cell_color: color de la celda (para agrupaciones por color)
+        # - raw_status: estado original del registro (ej. 'Aprobado')
+        for extra in ("cell_color", "raw_status"):
+            if extra in df.columns:
+                df[extra] = df[extra].fillna("").astype(str).str.strip()
+                base_cols.append(extra)
+
         result = df[base_cols].reset_index(drop=True)
 
         logger.info("[BANK] Movimientos normalizados: %d", len(result))
