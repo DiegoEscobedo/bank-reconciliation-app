@@ -1,7 +1,7 @@
-AMOUNT_TOLERANCE = 0.50       # centavo máximo permitido (BBVA redondea diferente al JDE)
+AMOUNT_TOLERANCE = 0.90       # centavo máximo permitido (BBVA redondea diferente al JDE)
 DATE_TOLERANCE_DAYS = 2       # cubre viernes → lunes y fines de semana largos
-MAX_GROUP_SIZE = 10           # más entradas por grupo (el filtro por tienda reduce candidatos)
-GROUPED_CANDIDATE_LIMIT = 15  # top N candidatos por monto para subset-sum (menos = más rápido)
+MAX_GROUP_SIZE = 15           # más entradas por grupo (el filtro por tienda reduce candidatos)
+GROUPED_CANDIDATE_LIMIT = 25  # top N candidatos por monto para subset-sum (menos = más rápido)
 ROUND_DECIMALS = 2
 
 # ── Mapeos de tipo de pago (fuente de verdad) ───────────────────────────────
